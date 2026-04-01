@@ -1,6 +1,6 @@
 # costkey
 
-> Sentry for AI costs. Track every LLM call's cost, tokens, and latency with one line of code.
+> AI cost observability. Track every LLM call's cost, tokens, and latency with one line of code.
 
 ## Install
 
@@ -21,7 +21,7 @@ CostKey.init({
 // Works with OpenAI, Anthropic, Google Gemini, Azure OpenAI.
 ```
 
-**No wrapping. No per-client setup. No manual tagging.** CostKey patches `fetch` globally and auto-detects AI provider calls — just like Sentry does for error tracking.
+**No wrapping. No per-client setup. No manual tagging.** CostKey patches `fetch` globally and auto-detects AI provider calls.
 
 ## What You Get (Zero Config)
 

@@ -1,7 +1,7 @@
 {
   "name": "costkey",
   "version": "0.2.0",
-  "description": "Sentry for AI costs. Track every LLM call's cost, tokens, and latency with one line of code.",
+  "description": "AI cost observability. Track every LLM call's cost, tokens, and latency with one line of code.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,7 +26,7 @@
   "keywords": [
     "ai", "llm", "cost", "tracking", "observability",
     "openai", "anthropic", "gemini", "google", "azure",
-    "tokens", "monitoring", "sentry", "tracing"
+    "tokens", "monitoring", "observability", "tracing"
   ],
   "author": "CostKey",
   "license": "MIT",
