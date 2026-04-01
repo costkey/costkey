@@ -46,6 +46,43 @@ const PRICING: Record<string, ModelPricing> = {
   "gemini-1.5-flash": { input: 0.075, output: 0.3 },
   "gemini-2.5-pro": { input: 1.25, output: 10 },
   "gemini-2.5-flash": { input: 0.15, output: 0.6 },
+
+  // xAI (Grok)
+  "grok-3": { input: 3, output: 15 },
+  "grok-3-mini": { input: 0.3, output: 0.5 },
+  "grok-4": { input: 3, output: 15 },
+
+  // Groq (fast inference — uses open models, pricing is Groq's)
+  "llama-3.3-70b-versatile": { input: 0.59, output: 0.79 },
+  "llama-3.1-8b-instant": { input: 0.05, output: 0.08 },
+  "llama-3-70b": { input: 0.59, output: 0.79 },
+  "mixtral-8x7b-32768": { input: 0.24, output: 0.24 },
+  "gemma2-9b-it": { input: 0.2, output: 0.2 },
+
+  // Mistral
+  "mistral-large-latest": { input: 2, output: 6 },
+  "mistral-medium-latest": { input: 2.7, output: 8.1 },
+  "mistral-small-latest": { input: 0.2, output: 0.6 },
+  "codestral-latest": { input: 0.3, output: 0.9 },
+  "open-mistral-nemo": { input: 0.15, output: 0.15 },
+
+  // DeepSeek
+  "deepseek-chat": { input: 0.14, output: 0.28, cacheRead: 0.014 },
+  "deepseek-reasoner": { input: 0.55, output: 2.19, cacheRead: 0.055 },
+
+  // Cohere
+  "command-r-plus": { input: 2.5, output: 10 },
+  "command-r": { input: 0.15, output: 0.6 },
+  "command-a": { input: 2.5, output: 10 },
+
+  // Together AI (popular models)
+  "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": { input: 3.5, output: 3.5 },
+  "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": { input: 0.88, output: 0.88 },
+  "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": { input: 0.18, output: 0.18 },
+
+  // Perplexity
+  "sonar-pro": { input: 3, output: 15 },
+  "sonar": { input: 1, output: 1 },
 };
 
 /**
