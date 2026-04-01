@@ -121,7 +121,7 @@ export type BeforeSendHook = (
 
 /** SDK configuration options */
 export interface CostKeyOptions {
-  /** DSN in format https://<key>@costkey.dev/<project-id> */
+  /** DSN in format https://<key>@app.costkey.dev/<project-id> */
   dsn: string;
   /** Capture request/response bodies (default: true) */
   captureBody?: boolean;

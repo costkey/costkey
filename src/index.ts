@@ -31,7 +31,7 @@ let initialized = false;
  * import { CostKey } from 'costkey'
  *
  * CostKey.init({
- *   dsn: 'https://ck_abc123@costkey.dev/my-project'
+ *   dsn: 'https://ck_abc123@app.costkey.dev/my-project'
  * })
  *
  * // That's it. Every AI call is now tracked.

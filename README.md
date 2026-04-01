@@ -14,7 +14,7 @@ npm install costkey
 import { CostKey } from 'costkey'
 
 CostKey.init({
-  dsn: 'https://ck_your_key@costkey.dev/your-project'
+  dsn: 'https://ck_your_key@app.costkey.dev/your-project'
 })
 
 // That's it. Every AI call is now tracked automatically.
@@ -132,7 +132,7 @@ pip install costkey
 
 ```python
 import costkey
-costkey.init(dsn="https://ck_...@costkey.dev/proj")
+costkey.init(dsn="https://ck_...@app.costkey.dev/proj")
 ```
 
 ## License
