@@ -2,9 +2,20 @@ import type { CallSite, StackFrame } from "./types.js";
 
 /** Frames from these packages are internal and should be stripped */
 const INTERNAL_PATTERNS = [
+  // CostKey
   "/costkey/packages/sdk/",
   "/node_modules/costkey/",
+  // Node internals
   "node:internal/",
+  "node:async_hooks",
+  // AI SDKs (internal transport)
+  "/node_modules/openai/",
+  "/node_modules/@anthropic-ai/",
+  "/node_modules/@google/generative-ai/",
+  "/node_modules/cohere-ai/",
+  // HTTP clients
+  "/node_modules/node-fetch/",
+  "/node_modules/undici/",
 ];
 
 /**
