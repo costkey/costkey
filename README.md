@@ -124,6 +124,17 @@ CostKey.init({
 ### `CostKey.registerExtractor(extractor)` — Add custom AI provider.
 ### `CostKey.registerPricing(model, pricing)` — Add custom model pricing.
 
+## Also available for Python
+
+```bash
+pip install costkey
+```
+
+```python
+import costkey
+costkey.init(dsn="https://ck_...@costkey.dev/proj")
+```
+
 ## License
 
 MIT
