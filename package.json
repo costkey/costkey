@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/namanarora00/costkey-sdk"
+    "url": "https://github.com/costkey/costkey"
   },
   "homepage": "https://costkey.dev",
   "engines": {
