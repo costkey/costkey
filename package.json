@@ -1,6 +1,6 @@
 {
   "name": "costkey",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sentry for AI costs. Track every LLM call's cost, tokens, and latency with one line of code.",
   "type": "module",
   "main": "./dist/index.js",

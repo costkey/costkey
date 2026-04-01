@@ -12,6 +12,9 @@ import { getCurrentContext } from "./context.js";
 import { Transport } from "./transport.js";
 import { computeCost } from "./pricing.js";
 
+const TRACE_HEADER = "x-costkey-trace-id";
+const TRACE_NAME_HEADER = "x-costkey-trace-name";
+
 export interface FetchPatchOptions {
   transport: Transport;
   projectId: string;
@@ -59,9 +62,18 @@ export function patchFetch(options: FetchPatchOptions): void {
       return originalFetch!(input, init);
     }
 
-    // Fast path: not an AI provider URL → pass through immediately
+    // Fast path: not an AI provider URL
     const extractor = findExtractor(url);
     if (!extractor) {
+      // Not an AI call — but if we have a traceId, propagate it via headers
+      // so downstream microservices can join the same trace
+      const ctx = getCurrentContext();
+      if (ctx.traceId) {
+        const headers = new Headers(init?.headers);
+        headers.set(TRACE_HEADER, ctx.traceId);
+        if (ctx.traceName) headers.set(TRACE_NAME_HEADER, ctx.traceName);
+        return originalFetch!(input, { ...init, headers });
+      }
       return originalFetch!(input, init);
     }
 
@@ -70,6 +82,25 @@ export function patchFetch(options: FetchPatchOptions): void {
     // Capture stack trace BEFORE the async call (otherwise we lose the caller's frames)
     const callSite = captureCallSite();
     const context = { ...options.defaultContext, ...getCurrentContext() };
+
+    // Auto-generate traceId if none exists in context
+    // Hash the parent frames of the stack trace — calls from the same
+    // request handler get the same hash = same trace
+    if (!context.traceId && callSite) {
+      context.traceId = generateTraceIdFromStack(callSite.frames);
+    }
+
+    // Check if an incoming trace header was set by an upstream service
+    // (this happens when Service A calls Service B and both have CostKey)
+    if (!context.traceId && init?.headers) {
+      const incomingTraceId = getHeader(init.headers, TRACE_HEADER);
+      if (incomingTraceId) {
+        context.traceId = incomingTraceId;
+        const incomingName = getHeader(init.headers, TRACE_NAME_HEADER);
+        if (incomingName) context.traceName = incomingName;
+      }
+    }
+
     const startTime = performance.now();
 
     // Parse and potentially modify the request body
@@ -518,4 +549,70 @@ function generateId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Auto-generate a traceId from stack trace frames.
+ *
+ * Hashes the "parent frames" (everything except the leaf AI call)
+ * so that multiple AI calls made from the same request handler
+ * get the same traceId automatically.
+ *
+ * Example:
+ *   Call 1: classifyIntent → handleSearch → expressRouter
+ *   Call 2: summarizeDoc → processResults → handleSearch → expressRouter
+ *   Shared parents: handleSearch, expressRouter
+ *   → Same hash → Same traceId → Grouped as one trace
+ */
+function generateTraceIdFromStack(frames: Array<{ functionName: string | null; fileName: string | null; lineNumber: number | null }>): string {
+  // Use parent frames (skip leaf at index 0 — that's the AI call itself)
+  // Take up to 5 parent frames for the hash
+  const parents = frames.slice(1, 6);
+
+  if (parents.length === 0) {
+    // No parent frames — use a random ID
+    return `tr_${generateId().slice(0, 16)}`;
+  }
+
+  // Create a stable string from the parent frames
+  const key = parents
+    .map((f) => `${f.functionName ?? "?"}@${f.fileName ?? "?"}`)
+    .join("|");
+
+  // Simple hash → hex string
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    const char = key.charCodeAt(i);
+    hash = ((hash << 5) - hash + char) | 0;
+  }
+
+  // Include a time bucket (5-second window) so traces from different
+  // requests don't collide even if they have the same stack
+  const timeBucket = Math.floor(Date.now() / 5000);
+  const combined = `${Math.abs(hash).toString(36)}_${timeBucket.toString(36)}`;
+
+  return `tr_auto_${combined}`;
+}
+
+/** Read a header value from various header formats */
+function getHeader(headers: unknown, name: string): string | null {
+  if (!headers) return null;
+
+  if (headers instanceof Headers) {
+    return headers.get(name);
+  }
+
+  if (Array.isArray(headers)) {
+    const entry = headers.find(([k]) => k.toLowerCase() === name.toLowerCase());
+    return entry ? entry[1] : null;
+  }
+
+  if (typeof headers === "object") {
+    const h = headers as Record<string, string>;
+    for (const [k, v] of Object.entries(h)) {
+      if (k.toLowerCase() === name.toLowerCase()) return v;
+    }
+  }
+
+  return null;
 }
