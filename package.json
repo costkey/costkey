@@ -1,6 +1,6 @@
 {
   "name": "costkey",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AI cost observability. Track every LLM call's cost, tokens, and latency with one line of code.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,9 +24,20 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "keywords": [
-    "ai", "llm", "cost", "tracking", "observability",
-    "openai", "anthropic", "gemini", "google", "azure",
-    "tokens", "monitoring", "observability", "tracing"
+    "ai",
+    "llm",
+    "cost",
+    "tracking",
+    "observability",
+    "openai",
+    "anthropic",
+    "gemini",
+    "google",
+    "azure",
+    "tokens",
+    "monitoring",
+    "observability",
+    "tracing"
   ],
   "author": "CostKey",
   "license": "MIT",
