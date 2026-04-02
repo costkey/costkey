@@ -122,3 +122,21 @@ export const cerebrasExtractor: ProviderExtractor = {
   extractUsage: extractOpenAIUsage,
   extractModel,
 };
+
+/**
+ * AI proxy/gateway providers — Portkey, Helicone, etc.
+ * These forward to OpenAI/Anthropic and return OpenAI-compatible responses.
+ */
+export const portkeyExtractor: ProviderExtractor = {
+  provider: Provider.OpenAI, // Portkey forwards to various providers, response format is OpenAI-compatible
+  match(url: URL) { return url.hostname === "api.portkey.ai"; },
+  extractUsage: extractOpenAIUsage,
+  extractModel,
+};
+
+export const heliconeExtractor: ProviderExtractor = {
+  provider: Provider.OpenAI,
+  match(url: URL) { return url.hostname === "oai.helicone.ai" || url.hostname === "anthropic.helicone.ai" || url.hostname === "gateway.helicone.ai"; },
+  extractUsage: extractOpenAIUsage,
+  extractModel,
+};

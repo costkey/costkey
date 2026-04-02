@@ -14,6 +14,8 @@ import {
   fireworksExtractor,
   perplexityExtractor,
   cerebrasExtractor,
+  portkeyExtractor,
+  heliconeExtractor,
 } from "./more.js";
 
 /** All registered provider extractors — checked in order */
@@ -41,6 +43,10 @@ const extractors: ProviderExtractor[] = [
   deepseekExtractor,     // api.deepseek.com
   cohereExtractor,       // api.cohere.com
   perplexityExtractor,   // api.perplexity.ai
+
+  // AI proxies/gateways
+  portkeyExtractor,      // api.portkey.ai
+  heliconeExtractor,     // *.helicone.ai
 ];
 
 /**
