@@ -1,5 +1,5 @@
 import { Provider } from "../types.js";
-import type { ProviderExtractor, NormalizedUsage } from "../types.js";
+import type { ProviderExtractor, NormalizedUsage } from "./types.js";
 
 const GOOGLE_HOSTS = new Set([
   "generativelanguage.googleapis.com",

@@ -12,6 +12,8 @@ export interface TransportOptions {
   flushInterval: number;
   /** Debug logging */
   debug: boolean;
+  /** Release version for sourcemap translation */
+  release?: string;
 }
 
 /**
@@ -69,6 +71,7 @@ export class Transport {
     const batch = this.queue.splice(0, this.options.maxBatchSize);
     const payload: TransportPayload = {
       sdkVersion: SDK_VERSION,
+      release: this.options.release,
       events: batch,
     };
 

@@ -3,12 +3,12 @@ import { parseDSN } from "../dsn.js";
 
 describe("DSN Parsing", () => {
   it("parses a valid DSN", () => {
-    const dsn = parseDSN("https://ck_abc123@app.costkey.dev/my-project");
+    const dsn = parseDSN("https://ck_abc123@costkey.dev/my-project");
     expect(dsn).toEqual({
       authKey: "ck_abc123",
-      host: "app.costkey.dev",
+      host: "costkey.dev",
       projectId: "my-project",
-      endpoint: "https://app.costkey.dev/api/v1/events",
+      endpoint: "https://costkey.dev/api/v1/events",
     });
   });
 
@@ -27,7 +27,7 @@ describe("DSN Parsing", () => {
   });
 
   it("throws on missing project ID", () => {
-    expect(() => parseDSN("https://key@app.costkey.dev/")).toThrow("missing project ID");
+    expect(() => parseDSN("https://key@costkey.dev/")).toThrow("missing project ID");
     expect(() => parseDSN("https://key@costkey.dev")).toThrow("missing project ID");
   });
 });

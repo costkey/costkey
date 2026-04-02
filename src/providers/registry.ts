@@ -1,4 +1,4 @@
-import type { ProviderExtractor } from "../types.js";
+import type { ProviderExtractor } from "./types.js";
 import { openaiExtractor } from "./openai.js";
 import { anthropicExtractor } from "./anthropic.js";
 import { googleExtractor } from "./google.js";

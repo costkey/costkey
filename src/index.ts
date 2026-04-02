@@ -9,7 +9,6 @@ import { patchFetch, unpatchFetch } from "./fetch-patch.js";
 import { Transport } from "./transport.js";
 import { withContext, getCurrentContext, startTrace, getCurrentTraceId } from "./context.js";
 import { registerExtractor } from "./providers/registry.js";
-import { registerPricing } from "./pricing.js";
 
 export type { CostKeyOptions, EventContext, BeforeSendHook, ProviderExtractor };
 export { Provider } from "./types.js";
@@ -31,7 +30,7 @@ let initialized = false;
  * import { CostKey } from 'costkey'
  *
  * CostKey.init({
- *   dsn: 'https://ck_abc123@app.costkey.dev/my-project'
+ *   dsn: 'https://ck_abc123@costkey.dev/my-project'
  * })
  *
  * // That's it. Every AI call is now tracked.
@@ -53,6 +52,7 @@ function init(options: CostKeyOptions): void {
     maxBatchSize: options.maxBatchSize ?? 50,
     flushInterval: options.flushInterval ?? 5000,
     debug: options.debug ?? false,
+    release: options.release,
   });
 
   patchFetch({
@@ -106,7 +106,6 @@ export const CostKey = {
   getCurrentContext,
   getCurrentTraceId,
   registerExtractor,
-  registerPricing,
 } as const;
 
 // Default export for convenience

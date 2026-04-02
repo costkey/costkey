@@ -1,5 +1,5 @@
 import { Provider } from "../types.js";
-import type { ProviderExtractor, NormalizedUsage } from "../types.js";
+import type { ProviderExtractor, NormalizedUsage } from "./types.js";
 
 /**
  * AWS Bedrock — Amazon's AI service
@@ -7,7 +7,7 @@ import type { ProviderExtractor, NormalizedUsage } from "../types.js";
  * Uses Converse API with TokenUsage in response
  */
 export const bedrockExtractor: ProviderExtractor = {
-  provider: Provider.Azure, // Closest enum — cloud provider
+  provider: Provider.Bedrock,
 
   match(url: URL): boolean {
     return url.hostname.includes("bedrock-runtime") && url.hostname.endsWith(".amazonaws.com");

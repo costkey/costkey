@@ -4,6 +4,17 @@ export enum Provider {
   Anthropic = "anthropic",
   Google = "google",
   Azure = "azure",
+  Groq = "groq",
+  xAI = "xai",
+  Mistral = "mistral",
+  DeepSeek = "deepseek",
+  Cohere = "cohere",
+  Together = "together",
+  Fireworks = "fireworks",
+  Perplexity = "perplexity",
+  Cerebras = "cerebras",
+  OpenRouter = "openrouter",
+  Bedrock = "bedrock",
   Unknown = "unknown",
 }
 
@@ -121,7 +132,7 @@ export type BeforeSendHook = (
 
 /** SDK configuration options */
 export interface CostKeyOptions {
-  /** DSN in format https://<key>@app.costkey.dev/<project-id> */
+  /** DSN in format https://<key>@costkey.dev/<project-id> */
   dsn: string;
   /** Capture request/response bodies (default: true) */
   captureBody?: boolean;
@@ -135,12 +146,16 @@ export interface CostKeyOptions {
   debug?: boolean;
   /** Additional default context applied to all events */
   defaultContext?: EventContext;
+  /** Release version — used for sourcemap translation on the server */
+  release?: string;
 }
 
 /** Batched payload sent to the ingest API */
 export interface TransportPayload {
   /** SDK version */
   sdkVersion: string;
+  /** Release version (for sourcemap translation) */
+  release?: string;
   /** Events in this batch */
   events: CostKeyEvent[];
 }

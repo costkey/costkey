@@ -110,7 +110,7 @@ describe("Fetch Patch", () => {
     expect(usage["inputTokens"]).toBe(10);
     expect(usage["outputTokens"]).toBe(5);
 
-    expect(event["costUsd"]).not.toBeNull();
+    expect(event["costUsd"]).toBeNull(); // Server calculates cost now, SDK sends null
     expect(event["callSite"]).not.toBeNull();
   });
 

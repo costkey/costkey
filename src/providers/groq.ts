@@ -1,12 +1,12 @@
 import { Provider } from "../types.js";
-import type { ProviderExtractor, NormalizedUsage } from "../types.js";
+import type { ProviderExtractor, NormalizedUsage } from "./types.js";
 
 /**
  * Groq — Fast inference API at api.groq.com
  * OpenAI-compatible response format
  */
 export const groqExtractor: ProviderExtractor = {
-  provider: Provider.Unknown, // Groq
+  provider: Provider.Groq,
 
   match(url: URL): boolean {
     return url.hostname === "api.groq.com";

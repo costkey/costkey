@@ -1,5 +1,5 @@
 import { Provider } from "../types.js";
-import type { ProviderExtractor, NormalizedUsage } from "../types.js";
+import type { ProviderExtractor, NormalizedUsage } from "./types.js";
 
 const OPENAI_HOSTS = new Set([
   "api.openai.com",

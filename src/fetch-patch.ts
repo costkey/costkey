@@ -10,8 +10,6 @@ import { findExtractor } from "./providers/registry.js";
 import { captureCallSite } from "./stack.js";
 import { getCurrentContext } from "./context.js";
 import { Transport } from "./transport.js";
-import { computeCost } from "./pricing.js";
-
 const TRACE_HEADER = "x-costkey-trace-id";
 const TRACE_NAME_HEADER = "x-costkey-trace-name";
 
@@ -438,11 +436,6 @@ interface BuildEventParams {
 }
 
 function buildEvent(params: BuildEventParams): CostKeyEvent {
-  const costUsd =
-    params.usage && params.model
-      ? computeCost(params.model, params.usage)
-      : null;
-
   return {
     id: generateId(),
     timestamp: new Date().toISOString(),
@@ -453,7 +446,7 @@ function buildEvent(params: BuildEventParams): CostKeyEvent {
     method: params.method,
     statusCode: params.statusCode,
     usage: params.usage,
-    costUsd,
+    costUsd: null, // Server calculates cost from usage + model
     durationMs: Math.round(params.durationMs * 100) / 100,
     streaming: params.streaming,
     streamTiming: params.streamTiming,

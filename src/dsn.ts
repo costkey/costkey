@@ -1,7 +1,7 @@
 /**
  * Parse a CostKey DSN string.
  * Format: https://<key>@<host>/<project-id>
- * Example: https://ck_abc123@app.costkey.dev/proj_xyz
+ * Example: https://ck_abc123@costkey.dev/proj_xyz
  */
 export interface ParsedDSN {
   authKey: string;
