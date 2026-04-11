@@ -435,13 +435,22 @@ interface BuildEventParams {
   context: EventContext;
 }
 
+function extractModelFromUrl(url: URL): string | null {
+  // Google Gemini: /v1beta/models/gemini-2.5-flash:generateContent
+  const match = url.pathname.match(/\/models\/([^/:]+)/);
+  return match ? match[1] : null;
+}
+
 function buildEvent(params: BuildEventParams): CostKeyEvent {
+  // Fallback: extract model from URL path if provider extractor didn't find it
+  const model = params.model ?? extractModelFromUrl(params.url);
+
   return {
     id: generateId(),
     timestamp: new Date().toISOString(),
     projectId: params.projectId,
     provider: params.extractor.provider,
-    model: params.model,
+    model,
     url: params.url.toString(),
     method: params.method,
     statusCode: params.statusCode,

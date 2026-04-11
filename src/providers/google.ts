@@ -50,8 +50,15 @@ export const googleExtractor: ProviderExtractor = {
     if (resp && typeof resp["modelVersion"] === "string")
       return resp["modelVersion"];
 
-    // Try to extract from the URL path (models/gemini-pro:generateContent)
-    // This is handled at the fetch-patch level instead
+    // Some wrappers include model in the response top-level
+    if (resp && typeof resp["model"] === "string")
+      return resp["model"];
+
+    // Check request body (some SDKs include model there)
+    const req = requestBody as Record<string, unknown> | null;
+    if (req && typeof req["model"] === "string")
+      return req["model"];
+
     return null;
   },
 
