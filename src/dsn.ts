@@ -16,21 +16,21 @@ export function parseDSN(dsn: string): ParsedDSN {
     url = new URL(dsn);
   } catch {
     throw new Error(
-      `[costkey] Invalid DSN: "${dsn}". Expected format: https://<key>@<host>/<project-id>`,
+      `[costkey] Invalid DSN: "${dsn}". Expected format: https://<key>@<host>/<project-id>. Get your DSN at https://app.costkey.dev`,
     );
   }
 
   const authKey = url.username;
   if (!authKey) {
     throw new Error(
-      `[costkey] DSN missing auth key. Expected format: https://<key>@<host>/<project-id>`,
+      `[costkey] DSN missing auth key. Expected format: https://<key>@<host>/<project-id>. Get your DSN at https://app.costkey.dev`,
     );
   }
 
   const projectId = url.pathname.replace(/^\//, "");
   if (!projectId) {
     throw new Error(
-      `[costkey] DSN missing project ID. Expected format: https://<key>@<host>/<project-id>`,
+      `[costkey] DSN missing project ID. Expected format: https://<key>@<host>/<project-id>. Get your DSN at https://app.costkey.dev`,
     );
   }
 

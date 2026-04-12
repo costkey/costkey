@@ -132,8 +132,8 @@ export type BeforeSendHook = (
 
 /** SDK configuration options */
 export interface CostKeyOptions {
-  /** DSN in format https://<key>@costkey.dev/<project-id> */
-  dsn: string;
+  /** DSN in format https://<key>@costkey.dev/<project-id>. Falls back to COSTKEY_DSN env var. If neither is set, SDK silently no-ops (test mode). */
+  dsn?: string;
   /** Capture request/response bodies (default: true) */
   captureBody?: boolean;
   /** Hook to modify/filter events before sending */

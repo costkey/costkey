@@ -44,7 +44,16 @@ function init(options: CostKeyOptions): void {
     return;
   }
 
-  const dsn = parseDSN(options.dsn);
+  // Support COSTKEY_DSN env var as fallback
+  const dsnString = options.dsn || (typeof process !== "undefined" ? process.env?.["COSTKEY_DSN"] : undefined);
+
+  // Test mode: if no DSN is provided (or explicitly set to empty), silently no-op
+  if (!dsnString) {
+    initialized = true;
+    return;
+  }
+
+  const dsn = parseDSN(dsnString);
 
   transport = new Transport({
     endpoint: dsn.endpoint,

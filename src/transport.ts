@@ -32,6 +32,7 @@ export class Transport {
   private timer: ReturnType<typeof setInterval> | null = null;
   private consecutiveFailures = 0;
   private backoffUntil = 0;
+  private hasConfirmedConnection = false;
 
   constructor(private readonly options: TransportOptions) {}
 
@@ -112,6 +113,14 @@ export class Transport {
         return;
       }
 
+      if (response.status === 401 || response.status === 403) {
+        // Auth failures always log — developer needs to know their DSN is wrong
+        console.warn(
+          `[costkey] Authentication failed (${response.status}). Check your DSN at https://app.costkey.dev/settings`,
+        );
+        return;
+      }
+
       if (!response.ok) {
         // Server error — put events back and retry
         if (response.status >= 500) {
@@ -132,6 +141,12 @@ export class Transport {
       // Success — reset backoff
       this.consecutiveFailures = 0;
       this.backoffUntil = 0;
+
+      // One-time connection confirmation on first successful delivery
+      if (response.ok && !this.hasConfirmedConnection) {
+        this.hasConfirmedConnection = true;
+        console.log("[costkey] Connected. Tracking AI calls.");
+      }
     } catch {
       // Network error — put events back and retry with backoff
       this.queue.unshift(...batch);
