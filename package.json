@@ -1,6 +1,6 @@
 {
   "name": "costkey",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AI cost observability. Track every LLM call's cost, tokens, and latency with one line of code.",
   "type": "module",
   "main": "./dist/index.js",

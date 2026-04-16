@@ -44,6 +44,16 @@ function init(options: CostKeyOptions): void {
     return;
   }
 
+  // Bump V8's default stackTraceLimit from 10 → 50 so we can see past deep
+  // async wrappers (Next.js/OpenTelemetry/framework internals). Without this,
+  // the user's actual route handler is often beyond frame 10 and we end up
+  // with every frame being framework code → null attribution. This is a
+  // one-time, process-wide setting. We take the max so we never reduce a
+  // limit the user has explicitly raised.
+  if (typeof Error !== "undefined" && typeof Error.stackTraceLimit === "number") {
+    Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
+  }
+
   // Support COSTKEY_DSN env var as fallback
   const dsnString = options.dsn || (typeof process !== "undefined" ? process.env?.["COSTKEY_DSN"] : undefined);
 

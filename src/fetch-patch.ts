@@ -41,7 +41,17 @@ export function patchFetch(options: FetchPatchOptions): void {
   originalFetch = globalThis.fetch;
   isPatched = true;
 
-  globalThis.fetch = async function costKeyFetchWrapper(
+  // Named function assigned to globalThis.fetch. V8 derives the displayed name
+  // from this function's .name property; webpack minifies `costKeyFetchWrapper`
+  // into a single-letter alias (e.g. 'G'), and then V8 falls back to the LHS
+  // and displays the frame as `G.globalThis.fetch`. The server's frame filter
+  // can't tell that's our SDK when it's bundled this way.
+  //
+  // Fix: after creating the function, overwrite .name with a distinctive marker
+  // that minifiers don't touch (because Object.defineProperty on .name is
+  // rarely rewritten). The server filter recognises the `__ck_` prefix and
+  // strips these frames regardless of bundler output.
+  const patchedFetch = async function __ck_patched_fetch__(
     input: string | URL | Request,
     init?: RequestInit,
   ): Promise<Response> {
@@ -188,6 +198,16 @@ export function patchFetch(options: FetchPatchOptions): void {
       options,
     });
   };
+
+  // Pin the name so minification can't lose it. This is the value that appears
+  // in stack frames and the server filter keys on the `__ck_` prefix.
+  try {
+    Object.defineProperty(patchedFetch, "name", { value: "__ck_patched_fetch__" });
+  } catch {
+    // Some environments (rare) have a non-configurable .name. Harmless.
+  }
+
+  globalThis.fetch = patchedFetch;
 }
 
 /** Restore the original fetch. Used for cleanup/testing. */

@@ -287,4 +287,22 @@ describe("Fetch Patch", () => {
     const body = await response.json();
     expect((body as Record<string, unknown>).model).toBe("gpt-4o");
   });
+
+  it("patched fetch has a distinctive name so bundlers can't hide the SDK frame", () => {
+    // Regression: pre-v0.3.1 the wrapper was an inline `async function
+    // costKeyFetchWrapper`. Webpack minified the inner name to a single letter
+    // and V8 displayed the frame as `G.globalThis.fetch` — the server's frame
+    // filter couldn't distinguish it from user code, so our own SDK appeared
+    // in users' "cost by function" dashboards.
+    const { transport } = createMockTransport();
+    patchFetch({
+      transport,
+      projectId: "test",
+      captureBody: true,
+      beforeSend: null,
+      defaultContext: {},
+      debug: false,
+    });
+    expect(globalThis.fetch.name).toBe("__ck_patched_fetch__");
+  });
 });
