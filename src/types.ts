@@ -148,6 +148,19 @@ export interface CostKeyOptions {
   defaultContext?: EventContext;
   /** Release version — used for sourcemap translation on the server */
   release?: string;
+  /**
+   * Client-side spend cap. When daily/monthly spend (tracked in-memory by this
+   * SDK instance) reaches the limit, new AI calls are blocked per `onExceed`
+   * policy. Alerts fire at 80% and 100% if alertWebhook is set.
+   *
+   * Per-process. For serverless/multi-worker deployments, each worker tracks
+   * its own spend — server-side enforcement will be added in a future version.
+   */
+  budget?: import("./budget.js").BudgetOptions;
+  /**
+   * Client-side rate limits. Per-process, in-memory sliding 60s window.
+   */
+  rateLimit?: import("./budget.js").RateLimitOptions;
 }
 
 /** Batched payload sent to the ingest API */

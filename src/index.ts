@@ -5,7 +5,7 @@ import type {
   ProviderExtractor,
 } from "./types.js";
 import { parseDSN } from "./dsn.js";
-import { patchFetch, unpatchFetch } from "./fetch-patch.js";
+import { patchFetch, unpatchFetch, getActiveBudgetGuard } from "./fetch-patch.js";
 import { Transport } from "./transport.js";
 import { withContext, getCurrentContext, startTrace, getCurrentTraceId } from "./context.js";
 import { registerExtractor } from "./providers/registry.js";
@@ -18,6 +18,21 @@ export type {
   CallSite,
   StreamTiming,
 } from "./types.js";
+export {
+  CostKeyBudgetExceeded,
+  CostKeyRateLimited,
+  type BudgetOptions,
+  type RateLimitOptions,
+  type BudgetExceedPolicy,
+} from "./budget.js";
+
+/**
+ * Read current budget / rate-limit usage. Useful for status endpoints.
+ * Returns null if SDK isn't initialized or budget isn't configured.
+ */
+function getUsage() {
+  return getActiveBudgetGuard()?.snapshot() ?? null;
+}
 
 let transport: Transport | null = null;
 let initialized = false;
@@ -81,6 +96,8 @@ function init(options: CostKeyOptions): void {
     beforeSend: options.beforeSend ?? null,
     defaultContext: options.defaultContext ?? {},
     debug: options.debug ?? false,
+    budget: options.budget,
+    rateLimit: options.rateLimit,
   });
 
   transport.start();
@@ -125,6 +142,7 @@ export const CostKey = {
   getCurrentContext,
   getCurrentTraceId,
   registerExtractor,
+  getUsage,
 } as const;
 
 // Default export for convenience

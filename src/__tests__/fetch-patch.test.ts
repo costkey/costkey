@@ -288,6 +288,89 @@ describe("Fetch Patch", () => {
     expect((body as Record<string, unknown>).model).toBe("gpt-4o");
   });
 
+  it("blocks AI calls when daily budget is exceeded (throw policy)", async () => {
+    const openaiResponse = {
+      id: "chatcmpl-abc",
+      model: "gpt-4o",
+      choices: [{ message: { content: "Hello!" } }],
+      // Large usage so the FIRST call blows the $0.01 budget
+      usage: {
+        prompt_tokens: 10_000,
+        completion_tokens: 5_000,
+        total_tokens: 15_000,
+      },
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(openaiResponse), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const { transport } = createMockTransport();
+    patchFetch({
+      transport,
+      projectId: "test",
+      captureBody: true,
+      beforeSend: null,
+      defaultContext: {},
+      debug: false,
+      budget: { daily: 0.01, onExceed: "throw" },
+    });
+
+    // First call succeeds (budget starts at $0), but records ~$0.075 of spend
+    // (10k input * $2.50/M + 5k output * $10/M = $0.025 + $0.050 = $0.075)
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    // Wait for the async record() to commit (processNonStreamingResponse is fire-and-forget)
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Second call should throw because budget is now blown
+    await expect(
+      globalThis.fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+      }),
+    ).rejects.toThrow(/budget exceeded/i);
+  });
+
+  it("returns synthetic 429 when budget exceeded and policy is 'block'", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ usage: { prompt_tokens: 10_000, completion_tokens: 5_000, total_tokens: 15_000 }, model: "gpt-4o" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const { transport } = createMockTransport();
+    patchFetch({
+      transport,
+      projectId: "test",
+      captureBody: true,
+      beforeSend: null,
+      defaultContext: {},
+      debug: false,
+      budget: { daily: 0.01, onExceed: "block" },
+    });
+
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const second = await globalThis.fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(second.status).toBe(429);
+    expect(second.headers.get("X-CostKey-Blocked")).toBe("1");
+    const body = await second.json() as { error: { type: string } };
+    expect(body.error.type).toBe("costkey_blocked");
+  });
+
   it("patched fetch has a distinctive name so bundlers can't hide the SDK frame", () => {
     // Regression: pre-v0.3.1 the wrapper was an inline `async function
     // costKeyFetchWrapper`. Webpack minified the inner name to a single letter

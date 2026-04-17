@@ -10,6 +10,14 @@ import { findExtractor } from "./providers/registry.js";
 import { captureCallSite } from "./stack.js";
 import { getCurrentContext } from "./context.js";
 import { Transport } from "./transport.js";
+import {
+  BudgetGuard,
+  estimateTokens,
+  setRawFetch,
+  type BudgetOptions,
+  type RateLimitOptions,
+} from "./budget.js";
+import { estimateCost, totalTokens } from "./pricing.js";
 const TRACE_HEADER = "x-costkey-trace-id";
 const TRACE_NAME_HEADER = "x-costkey-trace-name";
 
@@ -20,6 +28,14 @@ export interface FetchPatchOptions {
   beforeSend: BeforeSendHook | null;
   defaultContext: EventContext;
   debug: boolean;
+  budget?: BudgetOptions;
+  rateLimit?: RateLimitOptions;
+}
+
+/** Module-scoped so host apps can call `getBudgetSnapshot()` for status UIs. */
+let activeGuard: BudgetGuard | null = null;
+export function getActiveBudgetGuard(): BudgetGuard | null {
+  return activeGuard;
 }
 
 let originalFetch: typeof globalThis.fetch | null = null;
@@ -40,6 +56,12 @@ export function patchFetch(options: FetchPatchOptions): void {
 
   originalFetch = globalThis.fetch;
   isPatched = true;
+
+  // Set up budget/rate-limit guard if configured
+  activeGuard = new BudgetGuard(options.budget, options.rateLimit, options.debug);
+  // Give the guard the ORIGINAL fetch so alert webhooks don't recurse into
+  // our own interceptor.
+  setRawFetch(originalFetch);
 
   // Named function assigned to globalThis.fetch. V8 derives the displayed name
   // from this function's .name property; webpack minifies `costKeyFetchWrapper`
@@ -138,6 +160,32 @@ export function patchFetch(options: FetchPatchOptions): void {
       requestBody != null &&
       typeof requestBody === "object" &&
       (requestBody as Record<string, unknown>)["stream"] === true;
+
+    // Budget / rate-limit check. If block policy, return synthetic 429
+    // so user code can handle it like any upstream rate limit. If throw
+    // policy, this throws a typed error. If warn policy, proceeds.
+    if (activeGuard?.enabled) {
+      const check = activeGuard.checkOrThrow(estimateTokens(requestBody));
+      if (check === "blocked") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "costkey_blocked",
+              message:
+                "Request blocked by CostKey client-side budget/rate limit",
+            },
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "X-CostKey-Blocked": "1",
+              "Retry-After": "60",
+            },
+          },
+        );
+      }
+    }
 
     // Make the actual fetch call
     let response: Response;
@@ -252,6 +300,11 @@ async function processNonStreamingResponse(
       : null;
     const model = meta.extractor.extractModel(meta.requestBody, responseBody);
 
+    // Record against budget/rate-limit counters using our local pricing.
+    // The server may compute a slightly different (more authoritative) cost,
+    // but for client-side enforcement this is good enough.
+    activeGuard?.record(estimateCost(usage, model), totalTokens(usage));
+
     const event = buildEvent({
       projectId: options.projectId,
       extractor: meta.extractor,
@@ -337,6 +390,9 @@ function processStreamingResponse(
             meta.requestBody,
             meta.extractor,
           );
+
+          // Record against budget/rate-limit counters (streaming path)
+          activeGuard?.record(estimateCost(lastUsage, model), totalTokens(lastUsage));
 
           const event = buildEvent({
             projectId: meta.options.projectId,
