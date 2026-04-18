@@ -164,8 +164,14 @@ export function patchFetch(options: FetchPatchOptions): void {
     // Budget / rate-limit check. If block policy, return synthetic 429
     // so user code can handle it like any upstream rate limit. If throw
     // policy, this throws a typed error. If warn policy, proceeds.
+    //
+    // Model is extracted conservatively from the request body (final model
+    // may only be known post-response for some providers). Frames are the
+    // captured callsite so scope_function matches can apply.
     if (activeGuard?.enabled) {
-      const check = activeGuard.checkOrThrow(estimateTokens(requestBody));
+      const modelForCheck = extractor.extractModel(requestBody, null);
+      const framesForCheck = callSite?.frames ?? [];
+      const check = activeGuard.checkOrThrow(modelForCheck, framesForCheck, estimateTokens(requestBody));
       if (check === "blocked") {
         return new Response(
           JSON.stringify({
@@ -303,7 +309,12 @@ async function processNonStreamingResponse(
     // Record against budget/rate-limit counters using our local pricing.
     // The server may compute a slightly different (more authoritative) cost,
     // but for client-side enforcement this is good enough.
-    activeGuard?.record(estimateCost(usage, model), totalTokens(usage));
+    activeGuard?.record(
+      estimateCost(usage, model),
+      totalTokens(usage),
+      model,
+      meta.callSite?.frames ?? [],
+    );
 
     const event = buildEvent({
       projectId: options.projectId,
@@ -392,7 +403,12 @@ function processStreamingResponse(
           );
 
           // Record against budget/rate-limit counters (streaming path)
-          activeGuard?.record(estimateCost(lastUsage, model), totalTokens(lastUsage));
+          activeGuard?.record(
+            estimateCost(lastUsage, model),
+            totalTokens(lastUsage),
+            model,
+            meta.callSite?.frames ?? [],
+          );
 
           const event = buildEvent({
             projectId: meta.options.projectId,

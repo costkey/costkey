@@ -10,18 +10,18 @@ import { estimateCost, totalTokens } from "../pricing.js";
 describe("BudgetGuard — daily cap", () => {
   it("allows calls under budget", () => {
     const g = new BudgetGuard({ daily: 10, onExceed: "throw" }, undefined, false);
-    g.record(3, 1000);
-    g.record(3, 1000);
-    expect(() => g.checkOrThrow(0)).not.toThrow();
-    expect(g.snapshot().daily.spent).toBeCloseTo(6);
+    g.record(3, 1000, null, []);
+    g.record(3, 1000, null, []);
+    expect(() => g.checkOrThrow(null, [], 0)).not.toThrow();
+    expect(g.snapshot()[0].daily.spent).toBeCloseTo(6);
   });
 
   it("throws when daily budget exceeded (throw policy)", () => {
     const g = new BudgetGuard({ daily: 10, onExceed: "throw" }, undefined, false);
-    g.record(12, 1000);
-    expect(() => g.checkOrThrow(0)).toThrow(CostKeyBudgetExceeded);
+    g.record(12, 1000, null, []);
+    expect(() => g.checkOrThrow(null, [], 0)).toThrow(CostKeyBudgetExceeded);
     try {
-      g.checkOrThrow(0);
+      g.checkOrThrow(null, [], 0);
     } catch (e) {
       const err = e as CostKeyBudgetExceeded;
       expect(err.scope).toBe("daily");
@@ -34,25 +34,25 @@ describe("BudgetGuard — daily cap", () => {
   it("warns instead of throwing when policy is 'warn'", () => {
     const g = new BudgetGuard({ daily: 10, onExceed: "warn" }, undefined, false);
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    g.record(15, 1000);
-    expect(g.checkOrThrow(0)).toBe("ok");
+    g.record(15, 1000, null, []);
+    expect(g.checkOrThrow(null, [], 0)).toBe("ok");
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
 
   it("returns 'blocked' instead of throwing when policy is 'block'", () => {
     const g = new BudgetGuard({ daily: 10, onExceed: "block" }, undefined, false);
-    g.record(15, 1000);
-    expect(g.checkOrThrow(0)).toBe("blocked");
+    g.record(15, 1000, null, []);
+    expect(g.checkOrThrow(null, [], 0)).toBe("blocked");
   });
 
   it("suppresses repeated warnings within a minute (no stderr spam)", () => {
     const g = new BudgetGuard({ daily: 1, onExceed: "warn" }, undefined, false);
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    g.record(5, 100);
-    g.checkOrThrow(0); // first warn — logs
-    g.checkOrThrow(0); // second — suppressed
-    g.checkOrThrow(0); // third — suppressed
+    g.record(5, 100, null, []);
+    g.checkOrThrow(null, [], 0); // first warn — logs
+    g.checkOrThrow(null, [], 0); // second — suppressed
+    g.checkOrThrow(null, [], 0); // third — suppressed
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
@@ -61,8 +61,8 @@ describe("BudgetGuard — daily cap", () => {
 describe("BudgetGuard — monthly cap", () => {
   it("throws when monthly budget exceeded", () => {
     const g = new BudgetGuard({ monthly: 100, onExceed: "throw" }, undefined, false);
-    g.record(120, 1000);
-    expect(() => g.checkOrThrow(0)).toThrow(CostKeyBudgetExceeded);
+    g.record(120, 1000, null, []);
+    expect(() => g.checkOrThrow(null, [], 0)).toThrow(CostKeyBudgetExceeded);
   });
 });
 
@@ -73,10 +73,10 @@ describe("BudgetGuard — rate limits", () => {
       { callsPerMinute: 3, onExceed: "throw" },
       false,
     );
-    g.record(0.01, 100);
-    g.record(0.01, 100);
-    g.record(0.01, 100);
-    expect(() => g.checkOrThrow(0)).toThrow(CostKeyRateLimited);
+    g.record(0.01, 100, null, []);
+    g.record(0.01, 100, null, []);
+    g.record(0.01, 100, null, []);
+    expect(() => g.checkOrThrow(null, [], 0)).toThrow(CostKeyRateLimited);
   });
 
   it("throws when tokens-per-minute estimate exceeded", () => {
@@ -85,9 +85,9 @@ describe("BudgetGuard — rate limits", () => {
       { tokensPerMinute: 1000, onExceed: "throw" },
       false,
     );
-    g.record(0.01, 500);
+    g.record(0.01, 500, null, []);
     // Next call claims 600 estimated tokens: 500 + 600 = 1100 > 1000 → block
-    expect(() => g.checkOrThrow(600)).toThrow(CostKeyRateLimited);
+    expect(() => g.checkOrThrow(null, [], 600)).toThrow(CostKeyRateLimited);
   });
 
   it("skips token check when estimate is 0 (unknown request shape)", () => {
@@ -96,9 +96,9 @@ describe("BudgetGuard — rate limits", () => {
       { tokensPerMinute: 100, onExceed: "throw" },
       false,
     );
-    g.record(0.01, 99_999);
+    g.record(0.01, 99_999, null, []);
     // Estimate=0 means "we don't know" — don't block on it
-    expect(() => g.checkOrThrow(0)).not.toThrow();
+    expect(() => g.checkOrThrow(null, [], 0)).not.toThrow();
   });
 });
 
@@ -131,23 +131,23 @@ describe("BudgetGuard — alert webhook", () => {
     );
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    g.record(5, 100);
+    g.record(5, 100, null, []);
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(0); // 50% — no alert
 
-    g.record(3.5, 100); // now at 8.5 = 85% → 80% alert fires
+    g.record(3.5, 100, null, []); // now at 8.5 = 85% → 80% alert fires
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    g.record(0.5, 100); // still below 100% — no new alert
+    g.record(0.5, 100, null, []); // still below 100% — no new alert
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    g.record(2, 100); // now at 11 = 110% → 100% alert fires
+    g.record(2, 100, null, []); // now at 11 = 110% → 100% alert fires
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    g.record(2, 100); // already fired — no new alerts
+    g.record(2, 100, null, []); // already fired — no new alerts
     await new Promise((r) => setTimeout(r, 0));
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
@@ -167,29 +167,138 @@ describe("BudgetGuard — alert webhook", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     // Exceeds 80% AND 100% in one record — both should attempt, both fail silently
-    expect(() => g.record(2, 100)).not.toThrow();
+    expect(() => g.record(2, 100, null, [])).not.toThrow();
     spy.mockRestore();
   });
 });
 
 describe("BudgetGuard — snapshot", () => {
-  it("exposes current usage with limits", () => {
+  it("exposes current usage with limits (one rule per entry)", () => {
     const g = new BudgetGuard(
       { daily: 10, monthly: 100 },
       { callsPerMinute: 60, tokensPerMinute: 10_000 },
       false,
     );
-    g.record(2.5, 500);
-    g.record(1.0, 200);
+    g.record(2.5, 500, null, []);
+    g.record(1.0, 200, null, []);
     const s = g.snapshot();
-    expect(s.daily.spent).toBeCloseTo(3.5);
-    expect(s.daily.limit).toBe(10);
-    expect(s.monthly.spent).toBeCloseTo(3.5);
-    expect(s.monthly.limit).toBe(100);
-    expect(s.callsPerMinute.count).toBe(2);
-    expect(s.callsPerMinute.limit).toBe(60);
-    expect(s.tokensPerMinute.used).toBe(700);
-    expect(s.tokensPerMinute.limit).toBe(10_000);
+    expect(s).toHaveLength(1);
+    const r = s[0];
+    expect(r.id).toBe("__local__");
+    expect(r.daily.spent).toBeCloseTo(3.5);
+    expect(r.daily.limit).toBe(10);
+    expect(r.monthly.spent).toBeCloseTo(3.5);
+    expect(r.monthly.limit).toBe(100);
+    expect(r.callsPerMinute.count).toBe(2);
+    expect(r.callsPerMinute.limit).toBe(60);
+    expect(r.tokensPerMinute.used).toBe(700);
+    expect(r.tokensPerMinute.limit).toBe(10_000);
+  });
+});
+
+// ── New: scoped rules fetched from the server ─────────────────────────
+
+describe("BudgetGuard — scoped remote rules", () => {
+  const frames = (fn: string, file = "src/app.ts") => [{
+    functionName: fn, fileName: file, lineNumber: 1, columnNumber: 1,
+  }];
+
+  it("applies model-scoped rule only to matching model", () => {
+    const g = new BudgetGuard(undefined, undefined, false);
+    g.setRemoteRules([{
+      id: "r1", name: "opus cap",
+      scopeModel: "claude-opus-4*",
+      scopeFunction: null,
+      dailyUsd: 1, monthlyUsd: null,
+      callsPerMinute: null, tokensPerMinute: null,
+      onExceed: "throw",
+    }]);
+    g.record(2, 100, "claude-opus-4-5", frames("handler"));
+    // Non-matching model: unaffected
+    expect(() => g.checkOrThrow("gpt-4o", frames("handler"), 0)).not.toThrow();
+    // Matching model: over limit → throw
+    expect(() => g.checkOrThrow("claude-opus-4-5", frames("handler"), 0)).toThrow(CostKeyBudgetExceeded);
+  });
+
+  it("applies function-scoped rule only to matching frames", () => {
+    const g = new BudgetGuard(undefined, undefined, false);
+    g.setRemoteRules([{
+      id: "r2", name: "billing cap",
+      scopeModel: null,
+      scopeFunction: "generateInvoice*",
+      dailyUsd: 1, monthlyUsd: null,
+      callsPerMinute: null, tokensPerMinute: null,
+      onExceed: "throw",
+    }]);
+    g.record(2, 100, "gpt-4o", frames("generateInvoice"));
+    expect(() => g.checkOrThrow("gpt-4o", frames("processChat"), 0)).not.toThrow();
+    expect(() => g.checkOrThrow("gpt-4o", frames("generateInvoice"), 0)).toThrow(CostKeyBudgetExceeded);
+    expect(() => g.checkOrThrow("gpt-4o", frames("generateInvoiceV2"), 0)).toThrow(CostKeyBudgetExceeded);
+  });
+
+  it("combo rule requires BOTH model and function to match", () => {
+    const g = new BudgetGuard(undefined, undefined, false);
+    g.setRemoteRules([{
+      id: "r3", name: "expensive gpt-4o in report",
+      scopeModel: "gpt-4o",
+      scopeFunction: "*:generateReport",
+      dailyUsd: 1, monthlyUsd: null,
+      callsPerMinute: null, tokensPerMinute: null,
+      onExceed: "throw",
+    }]);
+    g.record(2, 100, "gpt-4o", frames("generateReport", "src/report.ts"));
+    // Model matches but function doesn't
+    expect(() => g.checkOrThrow("gpt-4o", frames("other"), 0)).not.toThrow();
+    // Function matches but model doesn't
+    expect(() => g.checkOrThrow("claude-opus-4-5", frames("generateReport"), 0)).not.toThrow();
+    // Both match
+    expect(() => g.checkOrThrow("gpt-4o", frames("generateReport"), 0)).toThrow(CostKeyBudgetExceeded);
+  });
+
+  it("setRemoteRules preserves local rule and its window", () => {
+    const g = new BudgetGuard({ daily: 5, onExceed: "throw" }, undefined, false);
+    g.record(2, 100, null, []);
+    g.setRemoteRules([{
+      id: "r4", name: "sub cap",
+      scopeModel: "gpt-4o",
+      scopeFunction: null,
+      dailyUsd: 100, monthlyUsd: null,
+      callsPerMinute: null, tokensPerMinute: null,
+      onExceed: "throw",
+    }]);
+    const s = g.snapshot();
+    expect(s).toHaveLength(2);
+    const local = s.find((r) => r.id === "__local__");
+    expect(local?.daily.spent).toBeCloseTo(2);
+    expect(local?.daily.limit).toBe(5);
+  });
+
+  it("most-restrictive policy wins when multiple rules fail", () => {
+    const g = new BudgetGuard(undefined, undefined, false);
+    g.setRemoteRules([
+      { id: "a", name: "warn", scopeModel: null, scopeFunction: null,
+        dailyUsd: 1, monthlyUsd: null, callsPerMinute: null, tokensPerMinute: null,
+        onExceed: "warn" },
+      { id: "b", name: "throw", scopeModel: null, scopeFunction: null,
+        dailyUsd: 1, monthlyUsd: null, callsPerMinute: null, tokensPerMinute: null,
+        onExceed: "throw" },
+    ]);
+    g.record(5, 100, null, []);
+    expect(() => g.checkOrThrow(null, [], 0)).toThrow(CostKeyBudgetExceeded);
+  });
+
+  it("setRemoteRules with empty array clears remote rules but keeps local", () => {
+    const g = new BudgetGuard({ daily: 10 }, undefined, false);
+    g.setRemoteRules([
+      { id: "x", name: null, scopeModel: null, scopeFunction: null,
+        dailyUsd: 5, monthlyUsd: null, callsPerMinute: null, tokensPerMinute: null,
+        onExceed: "throw" },
+    ]);
+    expect(g.snapshot()).toHaveLength(2);
+    g.setRemoteRules([]);
+    const s = g.snapshot();
+    expect(s).toHaveLength(1);
+    expect(s[0].id).toBe("__local__");
   });
 });
 

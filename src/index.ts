@@ -9,6 +9,7 @@ import { patchFetch, unpatchFetch, getActiveBudgetGuard } from "./fetch-patch.js
 import { Transport } from "./transport.js";
 import { withContext, getCurrentContext, startTrace, getCurrentTraceId } from "./context.js";
 import { registerExtractor } from "./providers/registry.js";
+import type { RemoteBudgetRule } from "./budget.js";
 
 export type { CostKeyOptions, EventContext, BeforeSendHook, ProviderExtractor };
 export { Provider } from "./types.js";
@@ -106,6 +107,47 @@ function init(options: CostKeyOptions): void {
   if (options.debug) {
     console.log(`[costkey] Initialized for project ${dsn.projectId}`);
   }
+
+  // Fetch budget rules from the server and keep them fresh. Failures are
+  // non-fatal — enforcement falls back to whatever was configured via init
+  // options (the __local__ rule) if the fetch fails.
+  startRuleSync(dsn.endpoint, dsn.authKey, options.debug ?? false);
+}
+
+// ─── Rule sync ────────────────────────────────────────────────────────
+
+let ruleSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopRuleSync(): void {
+  if (ruleSyncTimer) { clearInterval(ruleSyncTimer); ruleSyncTimer = null; }
+}
+
+function startRuleSync(endpoint: string, authKey: string, debug: boolean): void {
+  stopRuleSync();
+  // Fire once after a brief delay so we don't block init completion, then poll
+  // every 5 minutes. unref so this never keeps a Node process alive.
+  setTimeout(() => { void fetchRules(endpoint, authKey, debug) }, 500);
+  ruleSyncTimer = setInterval(() => { void fetchRules(endpoint, authKey, debug) }, 5 * 60 * 1000);
+  if (typeof ruleSyncTimer.unref === "function") ruleSyncTimer.unref();
+}
+
+async function fetchRules(endpoint: string, authKey: string, debug: boolean): Promise<void> {
+  try {
+    const url = endpoint.replace(/\/+$/, "") + "/api/v1/sdk/budget/rules";
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${authKey}` },
+    });
+    if (!res.ok) {
+      if (debug) console.warn(`[costkey] rule sync failed: HTTP ${res.status}`);
+      return;
+    }
+    const data = await res.json() as { rules: RemoteBudgetRule[] };
+    const guard = getActiveBudgetGuard();
+    if (guard) guard.setRemoteRules(data.rules ?? []);
+  } catch (err) {
+    if (debug) console.warn("[costkey] rule sync error:", err);
+    // Silent in non-debug mode — network hiccups shouldn't spam stderr.
+  }
 }
 
 /** Alias for init — familiar to MLflow users */
@@ -116,6 +158,7 @@ const autolog = init;
  * Call this before process exit to ensure all events are sent.
  */
 async function shutdown(): Promise<void> {
+  stopRuleSync();
   if (transport) {
     await transport.flush();
     transport.stop();
