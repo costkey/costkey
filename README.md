@@ -1,11 +1,19 @@
 # costkey
 
-> AI cost observability. Track every LLM call's cost, tokens, and latency with one line of code.
+> AI cost observability. Track every LLM call's cost, tokens, latency, prompts, and tool metadata with one CLI command.
 
-## Install
+## Setup
 
 ```bash
-npm install costkey
+npx costkey setup
+```
+
+The setup command authenticates in your browser, creates a project, writes `COSTKEY_DSN` to `.env`, detects frameworks like Next.js, Vite, Express, Fastify, Hono, Koa, NestJS, Remix, Astro, and SvelteKit, and writes `.costkey/setup.md`.
+
+For no-code server preloading:
+
+```bash
+NODE_OPTIONS=--import costkey/register npm start
 ```
 
 ## Quick Start
@@ -34,6 +42,7 @@ All of these work automatically after `init()`:
 - **Streaming metrics** — TTFT, tokens/sec, chunk timing for streaming responses
 - **Microservice propagation** — trace IDs auto-propagate across services via headers
 - **Credential scrubbing** — API keys, JWTs, and secrets are auto-redacted from captured bodies
+- **Prompt + tool metadata** — system prompts, messages, tool calls, and provider metadata on each trace
 - **Anomaly detection** — alerts when a function's cost spikes vs its 7-day baseline
 
 ## How It Works

@@ -18,6 +18,7 @@ export type {
   NormalizedUsage,
   CallSite,
   StreamTiming,
+  EventMetadata,
 } from "./types.js";
 export {
   CostKeyBudgetExceeded,

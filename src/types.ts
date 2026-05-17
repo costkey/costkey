@@ -68,6 +68,19 @@ export interface EventContext {
   [key: string]: string | number | boolean | undefined;
 }
 
+/** Provider-normalized prompt/tool/agent details captured from request/response payloads */
+export interface EventMetadata {
+  prompts?: Array<{ role: string; content: unknown }>;
+  toolDefinitions?: unknown[];
+  toolChoice?: unknown;
+  toolCalls?: unknown[];
+  toolResults?: unknown[];
+  webSearches?: unknown[];
+  citations?: unknown[];
+  agent?: Record<string, unknown>;
+  raw?: Record<string, unknown>;
+}
+
 /** The core event that the SDK ships to costkey.dev */
 export interface CostKeyEvent {
   /** Unique event ID */
@@ -105,6 +118,10 @@ export interface CostKeyEvent {
   /** User-provided context */
   context: EventContext;
 
+  /** Normalized provider metadata for prompts, tools, sources, and agent traces */
+  metadata?: EventMetadata | null;
+  /** Normalized system/developer instruction prompt extracted from the request */
+  systemPrompt?: string | null;
   /** Request body (prompt) — captured if captureBody is enabled */
   requestBody: unknown | null;
   /** Response body (completion) — captured if captureBody is enabled */

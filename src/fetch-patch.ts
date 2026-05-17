@@ -536,6 +536,7 @@ function extractModelFromUrl(url: URL): string | null {
 function buildEvent(params: BuildEventParams): CostKeyEvent {
   // Fallback: extract model from URL path if provider extractor didn't find it
   const model = params.model ?? extractModelFromUrl(params.url);
+  const systemPrompt = extractSystemPrompt(params.requestBody);
 
   return {
     id: generateId(),
@@ -553,9 +554,172 @@ function buildEvent(params: BuildEventParams): CostKeyEvent {
     streamTiming: params.streamTiming,
     callSite: params.callSite,
     context: params.context,
+    metadata: scrubCredentials(extractMetadata(params.requestBody, params.responseBody)) as CostKeyEvent["metadata"],
+    systemPrompt: systemPrompt ? (scrubCredentials(systemPrompt) as string) : null,
     requestBody: params.requestBody ? scrubCredentials(params.requestBody) : null,
     responseBody: params.responseBody ? scrubCredentials(params.responseBody) : null,
   };
+}
+
+function collectToolResults(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  const results: unknown[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const msg = message as Record<string, unknown>;
+    if (msg["role"] === "tool" || msg["role"] === "function") results.push(msg);
+    const content = msg["content"];
+    if (Array.isArray(content)) {
+      results.push(
+        ...content.filter((block) => !!block && typeof block === "object" && (block as Record<string, unknown>)["type"] === "tool_result"),
+      );
+    }
+  }
+  return results;
+}
+
+function collectResponseItems(responseBody: unknown): {
+  toolCalls: unknown[];
+  webSearches: unknown[];
+  citations: unknown[];
+} {
+  const toolCalls: unknown[] = [];
+  const webSearches: unknown[] = [];
+  const citations: unknown[] = [];
+  if (!responseBody || typeof responseBody !== "object") return { toolCalls, webSearches, citations };
+  const body = responseBody as Record<string, unknown>;
+
+  const choices = body["choices"];
+  if (Array.isArray(choices)) {
+    for (const choice of choices) {
+      if (!choice || typeof choice !== "object") continue;
+      const message = (choice as Record<string, unknown>)["message"];
+      if (message && typeof message === "object") {
+        const msg = message as Record<string, unknown>;
+        if (Array.isArray(msg["tool_calls"])) toolCalls.push(...msg["tool_calls"]);
+        if (msg["function_call"]) toolCalls.push(msg["function_call"]);
+        if (Array.isArray(msg["annotations"])) citations.push(...msg["annotations"]);
+      }
+    }
+  }
+
+  const output = body["output"];
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const type = String(obj["type"] ?? "");
+      if (type.includes("function_call") || type.includes("tool_call")) toolCalls.push(obj);
+      if (type.includes("web_search")) webSearches.push(obj);
+      if (Array.isArray(obj["content"])) {
+        for (const content of obj["content"]) {
+          if (!content || typeof content !== "object") continue;
+          const annotations = (content as Record<string, unknown>)["annotations"];
+          if (Array.isArray(annotations)) citations.push(...annotations);
+        }
+      }
+    }
+  }
+
+  const content = body["content"];
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const obj = block as Record<string, unknown>;
+      if (obj["type"] === "tool_use") toolCalls.push(obj);
+      if (Array.isArray(obj["citations"])) citations.push(...obj["citations"]);
+    }
+  }
+
+  const functionCalls = body["functionCalls"] ?? body["function_calls"];
+  if (Array.isArray(functionCalls)) toolCalls.push(...functionCalls);
+
+  const candidates = body["candidates"];
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const grounding = (candidate as Record<string, unknown>)["groundingMetadata"]
+        ?? (candidate as Record<string, unknown>)["grounding_metadata"];
+      if (grounding) webSearches.push(grounding);
+    }
+  }
+
+  const usage = body["usage"];
+  if (usage && typeof usage === "object") {
+    const serverToolUse = (usage as Record<string, unknown>)["server_tool_use"];
+    if (serverToolUse) webSearches.push({ usage: serverToolUse });
+  }
+
+  return { toolCalls, webSearches, citations };
+}
+
+function extractMetadata(requestBody: unknown, responseBody: unknown): CostKeyEvent["metadata"] {
+  if ((!requestBody || typeof requestBody !== "object") && (!responseBody || typeof responseBody !== "object")) return null;
+  const req = requestBody && typeof requestBody === "object" ? requestBody as Record<string, unknown> : {};
+  const prompts = Array.isArray(req["messages"])
+    ? req["messages"].map((message) => {
+      if (!message || typeof message !== "object") return { role: "unknown", content: message };
+      const msg = message as Record<string, unknown>;
+      return { role: String(msg["role"] ?? "unknown"), content: msg["content"] };
+    })
+    : Array.isArray(req["contents"])
+      ? req["contents"].map((content) => ({ role: String((content as Record<string, unknown>)["role"] ?? "user"), content }))
+      : req["input"] != null
+        ? [{ role: "input", content: req["input"] }]
+        : undefined;
+  const { toolCalls, webSearches, citations } = collectResponseItems(responseBody);
+  const toolResults = collectToolResults(req["messages"]);
+  const metadata: NonNullable<CostKeyEvent["metadata"]> = {};
+
+  if (prompts?.length) metadata.prompts = prompts;
+  if (Array.isArray(req["tools"]) && req["tools"].length) metadata.toolDefinitions = req["tools"];
+  if (req["tool_choice"] != null || req["toolChoice"] != null) metadata.toolChoice = req["tool_choice"] ?? req["toolChoice"];
+  if (toolCalls.length) metadata.toolCalls = toolCalls;
+  if (toolResults.length) metadata.toolResults = toolResults;
+  if (webSearches.length) metadata.webSearches = webSearches;
+  if (citations.length) metadata.citations = citations;
+
+  return Object.keys(metadata).length ? metadata : null;
+}
+
+function textFromContent(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts = content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const obj = part as Record<string, unknown>;
+      return typeof obj["text"] === "string" ? obj["text"] : "";
+    })
+    .filter(Boolean);
+  return parts.length ? parts.join("\n") : null;
+}
+
+function extractSystemPrompt(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const obj = body as Record<string, unknown>;
+
+  const direct = textFromContent(obj["system"] ?? obj["system_prompt"] ?? obj["systemPrompt"]);
+  if (direct) return direct;
+
+  const systemInstruction = obj["system_instruction"] ?? obj["systemInstruction"];
+  if (systemInstruction && typeof systemInstruction === "object") {
+    const fromParts = textFromContent((systemInstruction as Record<string, unknown>)["parts"]);
+    if (fromParts) return fromParts;
+  }
+
+  const messages = obj["messages"];
+  if (Array.isArray(messages)) {
+    const prompts = messages
+      .filter((msg): msg is Record<string, unknown> => !!msg && typeof msg === "object")
+      .filter((msg) => msg["role"] === "system" || msg["role"] === "developer")
+      .map((msg) => textFromContent(msg["content"]))
+      .filter((text): text is string => !!text);
+    if (prompts.length) return prompts.join("\n\n");
+  }
+
+  return null;
 }
 
 async function sendEvent(
@@ -590,8 +754,6 @@ async function sendEvent(
  * from captured request/response bodies.
  */
 function scrubCredentials(body: unknown): unknown {
-  if (body == null || typeof body !== "object") return body;
-
   // Patterns that look like API keys/secrets
   const SECRET_PATTERNS = [
     /^sk-[a-zA-Z0-9]{20,}$/,           // OpenAI keys
@@ -611,6 +773,14 @@ function scrubCredentials(body: unknown): unknown {
     "authorization", "auth",
     "private_key", "privatekey",
   ]);
+
+  if (typeof body === "string") {
+    for (const pattern of SECRET_PATTERNS) {
+      if (pattern.test(body)) return "[REDACTED]";
+    }
+    return body;
+  }
+  if (body == null || typeof body !== "object") return body;
 
   function scrub(obj: unknown): unknown {
     if (obj == null) return obj;
