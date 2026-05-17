@@ -10,6 +10,7 @@ import { findExtractor } from "./providers/registry.js";
 import { captureCallSite } from "./stack.js";
 import { getCurrentContext } from "./context.js";
 import { Transport } from "./transport.js";
+import { randomBytes } from "node:crypto";
 import {
   BudgetGuard,
   estimateTokens,
@@ -334,7 +335,10 @@ async function processNonStreamingResponse(
     });
 
     await sendEvent(event, options);
-  } catch {
+  } catch (err) {
+    if (options.debug) {
+      console.warn("[costkey] failed to process non-streaming response:", err);
+    }
     // Never crash user's app. Silently fail.
   }
 }
@@ -810,9 +814,7 @@ function scrubCredentials(body: unknown): unknown {
 
 /** Generate a random event ID */
 function generateId(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return randomBytes(16).toString("hex");
 }
 
 /**
