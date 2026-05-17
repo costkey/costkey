@@ -16,6 +16,16 @@ function createMockTransport() {
   };
 }
 
+async function waitFor(condition: () => boolean, timeoutMs = 500): Promise<void> {
+  const start = Date.now();
+  while (!condition()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("Timed out waiting for async CostKey processing");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Fetch Patch", () => {
   let originalFetch: typeof globalThis.fetch;
 
@@ -96,8 +106,7 @@ describe("Fetch Patch", () => {
     const body = await response.json();
     expect((body as Record<string, unknown>).model).toBe("gpt-4o");
 
-    // Wait a tick for async processing
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => events.length === 1);
 
     // Event should have been captured
     expect(events.length).toBe(1);
@@ -144,7 +153,7 @@ describe("Fetch Patch", () => {
       body: JSON.stringify({ model: "claude-sonnet-4-0-20250514", messages: [] }),
     });
 
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => events.length === 1);
 
     expect(events.length).toBe(1);
     const event = events[0] as Record<string, unknown>;
@@ -208,7 +217,7 @@ describe("Fetch Patch", () => {
       body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "secret" }] }),
     });
 
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => events.length === 1);
 
     expect(events.length).toBe(1);
     expect((events[0] as Record<string, unknown>)["requestBody"]).toBeNull();
