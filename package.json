@@ -23,6 +23,10 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -42,8 +46,11 @@
     "google",
     "azure",
     "tokens",
+    "prompts",
+    "tool-calls",
+    "agents",
+    "budgets",
     "monitoring",
-    "observability",
     "tracing"
   ],
   "author": "CostKey",
