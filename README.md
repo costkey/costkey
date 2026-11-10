@@ -483,6 +483,35 @@ example `@ai-sdk/amazon-bedrock`) need no setup.
 | `CostKey.exportContext()` / `exportContextHeaders()` | Explicit allowlisted cross-process carrier. |
 | `CostKey.shutdown()` | Flush and restore original fetch. |
 | `CostKey.instrumentBedrockClient(client)` | Record calls from an AWS SDK v3 `BedrockRuntimeClient`. |
+| `CostKey.runEval({ dataset, task })` | Run your task on every item of a labelled dataset, in your environment and with your keys, and score it. |
+
+### Evals on a labelled dataset
+
+Label calls from a run in the console (**Add to dataset**), then replay them
+against another model or prompt from your own code:
+
+```ts
+const summary = await CostKey.runEval({
+  dataset: "checkout clicks",
+  configuration: { model: "claude-haiku-4-5" },
+  task: (item) => anthropic.messages.create({ ...item.input, model: "claude-haiku-4-5" }),
+});
+// summary: { executionId, total, scored, passed, failed, errors, results }
+```
+
+- The dataset is read with a personal access token (`ck_pat_…`, read-only):
+  pass `apiToken` or set `COSTKEY_API_TOKEN`.
+- `item.input` is the original request with its screenshots put back, so a
+  computer-use step replays exactly. `item.incomplete` is true when a
+  screenshot couldn't be restored.
+- The run is one execution (kind `evaluation`). Each item runs in its own
+  trace with `caseId` and `phase: "candidate"`, so its calls are priced as
+  usual and the console compares the cost with the original calls.
+- The default scorer (`defaultEvalScore`) compares computer actions: items
+  labelled Good pass when the candidate takes the same action (clicks within
+  `tolerance`, default 40 px), items labelled Bad pass when it doesn't repeat
+  it, an `expected` action or text takes priority, and anything else is
+  unscored. Pass `score: (item, output) => ({ pass, reason })` to use your own.
 
 ## 0.7.4
 

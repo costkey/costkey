@@ -18,6 +18,7 @@ import type {
 import { parseDSN } from "./dsn.js";
 import { flushPendingCaptures, flushPendingPolicy, patchFetch, unpatchFetch } from "./fetch-patch.js";
 import { Transport } from "./transport.js";
+import { runEval, type EvalClient, type EvalSummary, type RunEvalOptions } from "./evals.js";
 import {
   exportContext,
   exportContextHeaders,
@@ -110,6 +111,7 @@ let localCaptureBodyDisabled = false;
 let localCaptureBody = true;
 let captureScreensRef: { current: boolean } | null = null;
 let localCaptureScreens = false;
+let evalClient: EvalClient | null = null;
 let configRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let configRequest: Promise<void> | null = null;
 let configSyncActive = false;
@@ -204,6 +206,12 @@ function init(options: import("./types.js").CostKeyOptions): void {
 
   transport.start();
   initialized = true;
+  evalClient = {
+    apiBase: dsn.endpoint.replace(/\/events\/?$/, ""),
+    projectId: dsn.projectId,
+    enqueue: (event) => transport?.enqueue(event),
+    flush,
+  };
 
   startRuntimeConfigSync(
     dsn.endpoint,
@@ -370,6 +378,14 @@ function clearRuntimeProviders(): void {
   runtimeTargets.length = 0;
 }
 
+/**
+ * Run your task on every item of a labelled dataset, in your environment and
+ * with your keys, as one tracked execution; scores land in the console.
+ */
+function runEvalOnDataset<T>(options: RunEvalOptions<T>): Promise<EvalSummary> {
+  return runEval(evalClient, options);
+}
+
 /** Alias for init — familiar to MLflow users. */
 const autolog = init;
 
@@ -413,6 +429,7 @@ async function shutdown(): Promise<void> {
   localCaptureBody = true;
   captureScreensRef = null;
   localCaptureScreens = false;
+  evalClient = null;
   clearRuntimeProviders();
   resetLifecycleState();
   initialized = false;
@@ -873,11 +890,14 @@ export const CostKey = {
   recordLiveKitUsage,
   recordLiveKitSessionUsage,
   instrumentBedrockClient,
+  runEval: runEvalOnDataset,
 } as const;
 
 export default CostKey;
 
 export { recordLiveKitUsage, recordLiveKitSessionUsage } from "./livekit.js";
+export { defaultEvalScore, computerAction } from "./evals.js";
+export type { EvalItem, EvalVerdict, EvalResult, EvalSummary, RunEvalOptions, ComputerAction } from "./evals.js";
 export { instrumentBedrockClient } from "./bedrock-client.js";
 export type { BedrockClientLike } from "./bedrock-client.js";
 export type {
