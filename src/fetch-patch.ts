@@ -11,6 +11,7 @@ import { captureCallSite } from "./stack.js";
 import { EventStreamDecoder, eventStreamChunk, eventStreamContent } from "./eventstream.js";
 import { getCallContext, importContext } from "./context.js";
 import { Transport } from "./transport.js";
+import { extractFrames, type ExtractedFrames } from "./frames.js";
 import { randomBytes } from "node:crypto";
 import type { PolicyAdmissionClient } from "./policy.js";
 import {
@@ -46,6 +47,8 @@ export interface FetchPatchOptions {
   debug: boolean;
   policy?: PolicyAdmissionClient | null;
   captureBodyRef?: { current: boolean };
+  /** Screen capture: upload images sent to the model (off unless set). */
+  captureScreensRef?: { current: boolean };
 }
 
 let originalFetch: typeof globalThis.fetch | null = null;
@@ -176,6 +179,9 @@ export function patchFetch(options: FetchPatchOptions): void {
     const contentRequestBody = captureBody
       ? parsedRequest ?? formFields(sentBody) ?? (typeof sentBody === "string" ? sentBody : null)
       : null;
+    const frames = shouldCaptureScreens(options) && parsedRequest !== null
+      ? safeExtractFrames(parsedRequest)
+      : null;
 
     // Each observed request gets its own event and admission identity. An
     // explicit attempt label groups retries but never becomes the event id.
@@ -196,6 +202,7 @@ export function patchFetch(options: FetchPatchOptions): void {
       request,
       captureBody,
       contentRequestBody,
+      frames,
     };
 
     let admission: PolicyAdmissionResult | null = null;
@@ -226,7 +233,7 @@ export function patchFetch(options: FetchPatchOptions): void {
       if (options.policy && admission?.reservationId) {
         trackPolicySettlement(settlePolicy(options.policy, admission, options.projectId, eventId, "unknown", true));
       }
-      await sendEvent(event, options, captureBody);
+      await sendEvent(event, options, captureBody, frames);
       throw err; // Never swallow the caller's error.
     }
 
@@ -282,6 +289,8 @@ interface CallBase {
   request: TelemetryRequest | null;
   captureBody: boolean;
   contentRequestBody: unknown;
+  /** Images in the request, when screen capture was on at request time. */
+  frames: ExtractedFrames | null;
 }
 
 interface CallResult {
@@ -484,7 +493,7 @@ async function finishCall(
     const outcome = result.completed && status >= 200 && status < 300 ? "success" : "unknown";
     trackPolicySettlement(settlePolicy(options.policy, admission, options.projectId, base.eventId, outcome, true));
   }
-  await sendEvent(event, options, base.captureBody);
+  await sendEvent(event, options, base.captureBody, base.frames);
 }
 
 function contentLength(headers: Headers): number | null {
@@ -602,6 +611,9 @@ export function recordObservedCall(observed: ObservedCall): void {
         request: telemetry.request,
         captureBody,
         contentRequestBody: captureBody ? observed.requestContent ?? null : null,
+        frames: shouldCaptureScreens(options) && observed.requestContent != null
+          ? safeExtractFrames(observed.requestContent)
+          : null,
       };
       const event = buildCallEvent(base, options.projectId, {
         response: telemetry.response,
@@ -610,7 +622,7 @@ export function recordObservedCall(observed: ObservedCall): void {
         durationMs: telemetry.durationMs ?? 0,
         contentResponseBody: captureBody ? observed.responseContent ?? null : null,
       }, telemetry.source);
-      await sendEvent(event, options, captureBody);
+      await sendEvent(event, options, captureBody, base.frames);
     } catch {
       // Never crash the caller.
     }
@@ -715,6 +727,20 @@ function shouldCaptureBody(options: FetchPatchOptions): boolean {
   return options.captureBodyRef?.current ?? options.captureBody;
 }
 
+function shouldCaptureScreens(options: FetchPatchOptions): boolean {
+  return options.captureScreensRef?.current === true;
+}
+
+/** Images in a request; null if anything goes wrong, so a call is never affected. */
+function safeExtractFrames(body: unknown): ExtractedFrames | null {
+  try {
+    const frames = extractFrames(body);
+    return frames.refs.length > 0 ? frames : null;
+  } catch {
+    return null;
+  }
+}
+
 function contextString(context: EventContext, key: string): string | null {
   const value = context[key];
   return typeof value === "string" ? value : null;
@@ -761,11 +787,12 @@ function buildCallEvent(
     datasetRevision: contextString(base.context, "datasetRevision"),
     caseId: contextString(base.context, "caseId"),
     requestBody: base.captureBody && base.contentRequestBody != null
-      ? captureContent(base.contentRequestBody)
+      ? captureContent(base.contentRequestBody, base.frames?.byValue)
       : null,
     responseBody: base.captureBody && result.contentResponseBody != null
       ? captureContent(result.contentResponseBody)
       : null,
+    ...(base.frames ? { frames: base.frames.refs } : {}),
     telemetry,
   };
 }
@@ -780,18 +807,24 @@ const BINARY_VALUE_KEYS = new Set([
 ]);
 const IMAGE_DATA_URI = /^data:(image\/[a-z0-9.+-]+)(?:;[^,]*)?,/i;
 
-function captureContent(body: unknown): unknown {
-  return sanitizeCapturedValue(scrubCredentials(body));
+function captureContent(body: unknown, frames?: Map<string, string>): unknown {
+  return sanitizeCapturedValue(scrubCredentials(body), undefined, frames);
 }
 
-function sanitizeCapturedValue(value: unknown, key?: string): unknown {
+/** "; frame <sha256>" when screen capture uploaded this image, so the body names its frame. */
+function frameSuffix(value: string, frames: Map<string, string> | undefined): string {
+  const sha256 = frames?.get(value);
+  return sha256 ? `; frame ${sha256}` : "";
+}
+
+function sanitizeCapturedValue(value: unknown, key?: string, frames?: Map<string, string>): unknown {
   if (typeof value === "string") {
     const image = value.match(IMAGE_DATA_URI);
     if (image) {
       const comma = value.indexOf(",");
       const encodedBytes = Math.max(0, value.length - comma - 1);
       const approxBytes = Math.floor(encodedBytes * 3 / 4);
-      return `[image data omitted: ${image[1]}; ~${approxBytes} bytes]`;
+      return `[image data omitted: ${image[1]}; ~${approxBytes} bytes${frameSuffix(value, frames)}]`;
     }
 
     if (key && BINARY_VALUE_KEYS.has(key.toLowerCase()) && value.length > 256) {
@@ -802,7 +835,7 @@ function sanitizeCapturedValue(value: unknown, key?: string): unknown {
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeCapturedValue(item, key));
+    return value.map((item) => sanitizeCapturedValue(item, key, frames));
   }
 
   if (value && typeof value === "object") {
@@ -822,9 +855,9 @@ function sanitizeCapturedValue(value: unknown, key?: string): unknown {
     for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
       if (imagePayload && entryKey.toLowerCase() === "data" && typeof entryValue === "string") {
         const encodedBytes = entryValue.length;
-        result[entryKey] = `[image data omitted: ${mimeType ?? "image/*"}; ~${Math.floor(encodedBytes * 3 / 4)} bytes]`;
+        result[entryKey] = `[image data omitted: ${mimeType ?? "image/*"}; ~${Math.floor(encodedBytes * 3 / 4)} bytes${frameSuffix(entryValue, frames)}]`;
       } else {
-        result[entryKey] = sanitizeCapturedValue(entryValue, entryKey);
+        result[entryKey] = sanitizeCapturedValue(entryValue, entryKey, frames);
       }
     }
     return result;
@@ -837,6 +870,7 @@ async function sendEvent(
   event: CostKeyEvent,
   options: FetchPatchOptions,
   captureBody = shouldCaptureBody(options),
+  frames: ExtractedFrames | null = null,
 ): Promise<void> {
   try {
     let finalEvent: CostKeyEvent | null = event;
@@ -862,8 +896,21 @@ async function sendEvent(
       };
     }
 
+    if (finalEvent && !frames && finalEvent.frames !== undefined) {
+      // Screen capture was off at request time: no frame list leaves the process.
+      const { frames: _dropped, ...rest } = finalEvent;
+      finalEvent = rest;
+    }
+
     if (finalEvent && isPatched) {
       options.transport.enqueue(finalEvent);
+      // Upload only the frames still listed after beforeSend, so the hook can drop them.
+      if (frames && Array.isArray(finalEvent.frames)) {
+        for (const ref of finalEvent.frames) {
+          const upload = ref && typeof ref.sha256 === "string" ? frames.uploads.get(ref.sha256) : undefined;
+          if (upload) options.transport.enqueueFrame(upload);
+        }
+      }
     }
   } catch {
     // Never crash. Ever.

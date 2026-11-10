@@ -1,6 +1,8 @@
 import type { CallTelemetry } from "./telemetry.js";
+import type { FrameRef } from "./frames.js";
 
 export type { CallTelemetry } from "./telemetry.js";
+export type { FrameRef } from "./frames.js";
 
 /**
  * Provider labels. Deprecated in 0.7.0: the SDK no longer labels calls; the
@@ -418,6 +420,8 @@ export interface RuntimeCaptureConfig {
     redactionEnabled: boolean;
     bodyRetentionDays?: number;
     metadataRetentionDays?: number;
+    /** Project allows screen capture (absent means off). */
+    screenCaptureEnabled?: boolean;
   };
   providers?: Array<Record<string, unknown>>;
 }
@@ -595,6 +599,11 @@ export interface CostKeyEvent {
   requestBody: unknown | null;
   /** Response body content, only when body capture is enabled (scrubbed, never truncated). */
   responseBody: unknown | null;
+  /**
+   * Images in the request, in order (newest last), only when screen capture
+   * is on. Each is uploaded separately, once, by hash.
+   */
+  frames?: FrameRef[];
   /** Raw telemetry (contract v1): always present, never content. */
   telemetry: CallTelemetry;
 }
@@ -610,6 +619,12 @@ export interface CostKeyOptions {
   dsn?: string;
   /** Capture request/response bodies (default: true; media bytes are omitted, text is sent whole) */
   captureBody?: boolean;
+  /**
+   * Upload images sent to the model, such as an agent's screenshots, so the
+   * console can replay the run (default: false). Also needs screen capture
+   * turned on for the project. Each image is uploaded once.
+   */
+  captureScreens?: boolean;
   /** Hook to modify/filter events before sending */
   beforeSend?: BeforeSendHook;
   /** Hook for additive lifecycle and explicit usage records. */
