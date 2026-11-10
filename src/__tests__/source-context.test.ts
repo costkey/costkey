@@ -28,8 +28,12 @@ function fixture(contents: string): string {
 
 afterEach(() => __setSourceFsForTests(undefined));
 
+// Source context reads files through process.getBuiltinModule (Node 20.16+ and
+// 22.3+). Older Node skips source context by design, so these have nothing to check.
+const itWithFs = typeof (process as { getBuiltinModule?: unknown }).getBuiltinModule === "function" ? it : it.skip;
+
 describe("source context on call-site frames", () => {
-  it("attaches the call line and three lines either side to the caller's own frame", () => {
+  itWithFs("attaches the call line and three lines either side to the caller's own frame", () => {
     const site = captureCallSite(); // THE CALL LINE
     const self = fileURLToPath(import.meta.url);
     const mine = site!.frames.find((f) => f.fileName === self || f.fileName === `file://${self}`);
@@ -49,7 +53,7 @@ describe("source context on call-site frames", () => {
     }
   });
 
-  it("reads files once and slices around the line", () => {
+  itWithFs("reads files once and slices around the line", () => {
     const path = fixture(["one", "two", "three", "four", "five", "six", "seven", "eight"].join("\n"));
     const frames = [frame(path, 1), frame(path, 5), frame(path, 8)];
     addSourceContext(frames);
@@ -58,7 +62,7 @@ describe("source context on call-site frames", () => {
     expect(frames[2]).toMatchObject({ contextLine: "eight", postContext: [] });
   });
 
-  it("caps each line at 500 chars and strips carriage returns", () => {
+  itWithFs("caps each line at 500 chars and strips carriage returns", () => {
     const path = fixture(`a = 1\r\n${"x".repeat(2000)}\r\nb = 2\r\n`);
     const frames = [frame(path, 2)];
     addSourceContext(frames);
@@ -67,7 +71,7 @@ describe("source context on call-site frames", () => {
     expect(frames[0].postContext).toEqual(["b = 2", ""]);
   });
 
-  it("only fills the first 8 in-app frames; dependency frames do not count", () => {
+  itWithFs("only fills the first 8 in-app frames; dependency frames do not count", () => {
     const path = fixture("line\n".repeat(20));
     const dep = frame("/app/node_modules/openai/index.js", 1);
     const frames = [dep, ...Array.from({ length: 10 }, (_, i) => frame(path, i + 1))];
