@@ -76,6 +76,7 @@ export type {
   PolicyAdmissionHandler,
   PolicyOptions,
   RuntimeCaptureConfig,
+  FrameRef,
 } from "./types.js";
 export { Provider } from "./types.js";
 export { CostKeyPolicyClient, CostKeyPolicyRefused } from "./policy.js";
@@ -107,6 +108,8 @@ let debugEnabled = false;
 let captureBodyRef: { current: boolean } | null = null;
 let localCaptureBodyDisabled = false;
 let localCaptureBody = true;
+let captureScreensRef: { current: boolean } | null = null;
+let localCaptureScreens = false;
 let configRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let configRequest: Promise<void> | null = null;
 let configSyncActive = false;
@@ -143,8 +146,10 @@ function init(options: import("./types.js").CostKeyOptions): void {
   debugEnabled = options.debug ?? false;
   localCaptureBodyDisabled = options.captureBody === false;
   localCaptureBody = options.captureBody ?? true;
+  localCaptureScreens = options.captureScreens === true;
   // Fail closed until the DSN-authenticated runtime configuration is known.
   captureBodyRef = { current: false };
+  captureScreensRef = { current: false };
   configSyncActive = true;
   policyClient = options.policy
     ? new CostKeyPolicyClient({
@@ -190,6 +195,7 @@ function init(options: import("./types.js").CostKeyOptions): void {
     projectId: dsn.projectId,
     captureBody: false,
     captureBodyRef,
+    captureScreensRef,
     beforeSend: options.beforeSend ?? null,
     defaultContext,
     debug: options.debug ?? false,
@@ -287,12 +293,17 @@ async function fetchRuntimeConfig(
       config.capture.mode === "text" && config.capture.bodyCaptureEnabled;
     captureBodyRef.current =
       !localCaptureBodyDisabled && localCaptureBody && remoteAllowsBodies;
+    // Screen capture needs both: the app opts in and the project allows it.
+    if (captureScreensRef) {
+      captureScreensRef.current = localCaptureScreens && config.capture.screenCaptureEnabled === true;
+    }
     applyRuntimeProviders(config.providers ?? []);
   } catch (error) {
     if (configSyncActive && generation === configGeneration && projectId === project && captureBodyRef) {
       // A missing/revoked config fails closed for payload content but does not
       // block provider execution or discard metadata/usage observations.
       captureBodyRef.current = false;
+      if (captureScreensRef) captureScreensRef.current = false;
     }
     if (debug) console.warn("[costkey] runtime capture config unavailable; using metadata-only capture");
   } finally {
@@ -327,6 +338,9 @@ function normalizeRuntimeConfig(
         : {}),
       ...(typeof captureObject["metadataRetentionDays"] === "number"
         ? { metadataRetentionDays: captureObject["metadataRetentionDays"] }
+        : {}),
+      ...(typeof captureObject["screenCaptureEnabled"] === "boolean"
+        ? { screenCaptureEnabled: captureObject["screenCaptureEnabled"] }
         : {}),
     },
     providers: Array.isArray(providers)
@@ -397,6 +411,8 @@ async function shutdown(): Promise<void> {
   captureBodyRef = null;
   localCaptureBodyDisabled = false;
   localCaptureBody = true;
+  captureScreensRef = null;
+  localCaptureScreens = false;
   clearRuntimeProviders();
   resetLifecycleState();
   initialized = false;

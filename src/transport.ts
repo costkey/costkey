@@ -1,4 +1,5 @@
 import type { CostKeyTelemetryEvent } from "./types.js";
+import type { FrameUpload } from "./frames.js";
 import { SDK_VERSION } from "./version.js";
 
 export interface TransportOptions {
@@ -26,6 +27,10 @@ export interface TransportOptions {
 
 /** Default byte budget for one POST body to /api/v1/events. */
 export const MAX_BATCH_BYTES = 8 * 1024 * 1024;
+/** Frame bytes held for upload; the oldest are dropped past this. */
+export const MAX_FRAME_QUEUE_BYTES = 32 * 1024 * 1024;
+/** Hashes remembered as sent, so history images resent on every call upload once. */
+export const SENT_FRAME_MEMORY = 4096;
 
 /**
  * Batched, async, non-blocking transport.
@@ -40,6 +45,12 @@ export class Transport {
   private readonly maxQueueSize = 500;
   private hasConfirmedConnection = false;
   private inFlight: Promise<void> | null = null;
+  private frameQueue: FrameUpload[] = [];
+  private frameQueueBytes = 0;
+  /** Hashes queued or sent this process, oldest first. */
+  private readonly sentFrames = new Set<string>();
+  private framesInFlight: Promise<void> | null = null;
+  private framesDisabled = false;
 
   constructor(private readonly options: TransportOptions) {}
 
@@ -79,12 +90,110 @@ export class Transport {
     }
   }
 
-  /** Flush all queued events. Best-effort, never throws. */
+  /** Flush all queued events and frames. Best-effort, never throws. */
   flush(): Promise<void> {
+    return Promise.all([this.flushEvents(), this.flushFrames()]).then(() => undefined);
+  }
+
+  private flushEvents(): Promise<void> {
     if (this.inFlight) return this.inFlight;
     if (this.queue.length === 0) return Promise.resolve();
     this.inFlight = this.drain().finally(() => { this.inFlight = null; });
     return this.inFlight;
+  }
+
+  /**
+   * Queue an image for upload, once per hash for the life of the process.
+   * Never throws; the oldest frames are dropped when the queue is full.
+   */
+  enqueueFrame(frame: FrameUpload): void {
+    if (this.framesDisabled || this.sentFrames.has(frame.sha256)) return;
+    this.rememberFrame(frame.sha256);
+    this.frameQueue.push(frame);
+    this.frameQueueBytes += frame.bytes.length;
+    while (this.frameQueueBytes > MAX_FRAME_QUEUE_BYTES && this.frameQueue.length > 1) {
+      const dropped = this.frameQueue.shift()!;
+      this.frameQueueBytes -= dropped.bytes.length;
+      // Not sent: a later call that resends this image can queue it again.
+      this.sentFrames.delete(dropped.sha256);
+      if (this.options.debug) console.warn("[costkey] Frame queue full, dropping oldest frame");
+    }
+    void this.flushFrames();
+  }
+
+  private rememberFrame(sha256: string): void {
+    this.sentFrames.add(sha256);
+    while (this.sentFrames.size > SENT_FRAME_MEMORY) {
+      const oldest = this.sentFrames.values().next().value as string;
+      this.sentFrames.delete(oldest);
+    }
+  }
+
+  private flushFrames(): Promise<void> {
+    if (this.framesInFlight) return this.framesInFlight;
+    if (this.frameQueue.length === 0) return Promise.resolve();
+    this.framesInFlight = this.drainFrames().finally(() => { this.framesInFlight = null; });
+    return this.framesInFlight;
+  }
+
+  private async drainFrames(): Promise<void> {
+    while (this.frameQueue.length > 0 && !this.framesDisabled) {
+      const frame = this.frameQueue.shift()!;
+      this.frameQueueBytes -= frame.bytes.length;
+      if (!(await this.sendFrame(frame))) return;
+    }
+  }
+
+  /** PUT one frame's bytes. Returns false when the rest of the queue should wait. */
+  private async sendFrame(frame: FrameUpload): Promise<boolean> {
+    const endpoint = framesEndpoint(this.options.endpoint);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await withoutOtelTracing(() => fetch(`${endpoint}/${frame.sha256}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": frame.mediaType,
+          Authorization: `Bearer ${this.options.authKey}`,
+          "User-Agent": `costkey-sdk/${SDK_VERSION}`,
+        },
+        body: frame.bytes,
+        signal: controller.signal,
+      }));
+      if (response.ok) return true;
+      if (response.status === 404 || response.status === 405 || response.status === 501) {
+        // The server doesn't take frames yet: stop for this process.
+        this.disableFrames(`Frame upload isn't supported by this server (${response.status})`);
+        return false;
+      }
+      if (response.status === 401 || response.status === 403) {
+        this.disableFrames(`Frame upload was refused (${response.status})`);
+        return false;
+      }
+      if (response.status === 429) {
+        // Put it back at the head; the flush interval retries.
+        this.frameQueue.unshift(frame);
+        this.frameQueueBytes += frame.bytes.length;
+        return false;
+      }
+      // Any other answer drops this frame; a later call that resends it can retry.
+      this.sentFrames.delete(frame.sha256);
+      if (this.options.debug) console.warn(`[costkey] Frame upload returned ${response.status}`);
+      return true;
+    } catch (err) {
+      this.sentFrames.delete(frame.sha256);
+      if (this.options.debug) console.warn("[costkey] Failed to upload a frame:", err);
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private disableFrames(reason: string): void {
+    this.framesDisabled = true;
+    this.frameQueue = [];
+    this.frameQueueBytes = 0;
+    if (this.options.debug) console.warn(`[costkey] ${reason}; screen capture is off for this process`);
   }
 
   /** Send batches until the queue is empty or delivery should wait. */
@@ -197,6 +306,11 @@ export class Transport {
       return false;
     }
   }
+}
+
+/** The frames endpoint next to the events endpoint the DSN names. */
+export function framesEndpoint(eventsEndpoint: string): string {
+  return `${eventsEndpoint.replace(/\/api\/v1\/events\/?$/, "")}/api/v1/frames`;
 }
 
 /** UTF-8 length of a string, without allocating (works outside Node too). */

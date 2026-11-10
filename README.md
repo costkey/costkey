@@ -455,6 +455,7 @@ example `@ai-sdk/amazon-bedrock`) need no setup.
 |---|---|---|
 | `dsn` | required | `http://ck_key@localhost:4100/project` |
 | `captureBody` | `true` | Also send request/response content (subject to the project's capture setting) |
+| `captureScreens` | `false` (`COSTKEY_CAPTURE_SCREENS=true` with `costkey/register`) | Upload images sent to the model, such as an agent's screenshots, once each, so the console can replay the run. Needs screen capture turned on for the project too |
 | `release` | `COSTKEY_RELEASE`, then the commit | Release version, for comparing deploys and sourcemap translation |
 | `commit` | detected | Commit SHA of the running code (`COSTKEY_COMMIT`, CI variables, `.git`) |
 | `repository` | detected | Repository URL the console links commits to (`COSTKEY_REPOSITORY`, CI variables, `.git`) |
