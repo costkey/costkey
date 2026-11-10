@@ -1,26 +1,41 @@
 import type {
-  CostKeyEvent,
-  NormalizedUsage,
-  StreamTiming,
   BeforeSendHook,
+  CallSite,
+  CostKeyEvent,
   EventContext,
+  PolicyAdmissionResult,
+  PolicySettlementRequest,
 } from "./types.js";
-import { Provider } from "./types.js";
-import { findExtractor } from "./providers/registry.js";
+import { findCaptureTarget, injectStreamUsage, type CaptureTarget } from "./providers/registry.js";
 import { captureCallSite } from "./stack.js";
-import { getCurrentContext } from "./context.js";
+import { EventStreamDecoder, eventStreamChunk, eventStreamContent } from "./eventstream.js";
+import { getCallContext, importContext } from "./context.js";
 import { Transport } from "./transport.js";
 import { randomBytes } from "node:crypto";
+import type { PolicyAdmissionClient } from "./policy.js";
 import {
-  BudgetGuard,
-  estimateTokens,
-  setRawFetch,
-  type BudgetOptions,
-  type RateLimitOptions,
-} from "./budget.js";
-import { estimateCost, totalTokens } from "./pricing.js";
+  StreamRecorder,
+  TELEMETRY_VERSION,
+  TextStreamParser,
+  requestBodySkeleton,
+  round,
+  sanitizeTelemetryUrl,
+  stripUrlQuery,
+  telemetryError,
+  telemetryRequestHeaders,
+  telemetryResponseHeaders,
+  textBodySkeleton,
+  type CallTelemetry,
+  type StreamFormat,
+  type TelemetryRequest,
+  type TelemetryResponse,
+} from "./telemetry.js";
+
 const TRACE_HEADER = "x-costkey-trace-id";
+/** Captured streamed responses: `{"__costkey_stream__": [every event, in order]}`. */
+export const STREAM_CONTENT_KEY = "__costkey_stream__";
 const TRACE_NAME_HEADER = "x-costkey-trace-name";
+const CONTEXT_HEADER = "x-costkey-context";
 
 export interface FetchPatchOptions {
   transport: Transport;
@@ -29,22 +44,20 @@ export interface FetchPatchOptions {
   beforeSend: BeforeSendHook | null;
   defaultContext: EventContext;
   debug: boolean;
-  budget?: BudgetOptions;
-  rateLimit?: RateLimitOptions;
-}
-
-/** Module-scoped so host apps can call `getBudgetSnapshot()` for status UIs. */
-let activeGuard: BudgetGuard | null = null;
-export function getActiveBudgetGuard(): BudgetGuard | null {
-  return activeGuard;
+  policy?: PolicyAdmissionClient | null;
+  captureBodyRef?: { current: boolean };
 }
 
 let originalFetch: typeof globalThis.fetch | null = null;
 let isPatched = false;
+// Calls observed outside fetch (AWS SDK middleware, integrations) report through the same pipeline.
+let activeOptions: FetchPatchOptions | null = null;
+const pendingCaptures = new Set<Promise<void>>();
+const pendingPolicySettlements = new Set<Promise<void>>();
 
 /**
- * Monkey-patch globalThis.fetch to intercept AI provider calls.
- * Non-AI calls pass through with zero overhead beyond a URL hostname check.
+ * Monkey-patch globalThis.fetch to observe AI provider calls. Requests to
+ * other hosts pass through after a hostname check.
  */
 export function patchFetch(options: FetchPatchOptions): void {
   if (isPatched) return;
@@ -57,28 +70,12 @@ export function patchFetch(options: FetchPatchOptions): void {
 
   originalFetch = globalThis.fetch;
   isPatched = true;
+  activeOptions = options;
 
-  // Set up budget/rate-limit guard if configured
-  activeGuard = new BudgetGuard(options.budget, options.rateLimit, options.debug);
-  // Give the guard the ORIGINAL fetch so alert webhooks don't recurse into
-  // our own interceptor.
-  setRawFetch(originalFetch);
-
-  // Named function assigned to globalThis.fetch. V8 derives the displayed name
-  // from this function's .name property; webpack minifies `costKeyFetchWrapper`
-  // into a single-letter alias (e.g. 'G'), and then V8 falls back to the LHS
-  // and displays the frame as `G.globalThis.fetch`. The server's frame filter
-  // can't tell that's our SDK when it's bundled this way.
-  //
-  // Fix: after creating the function, overwrite .name with a distinctive marker
-  // that minifiers don't touch (because Object.defineProperty on .name is
-  // rarely rewritten). The server filter recognises the `__ck_` prefix and
-  // strips these frames regardless of bundler output.
-  const patchedFetch = async function __ck_patched_fetch__(
+  globalThis.fetch = async function costKeyFetchWrapper(
     input: string | URL | Request,
     init?: RequestInit,
   ): Promise<Response> {
-    // Parse URL from whatever fetch input format we got
     let url: URL;
     try {
       const urlStr =
@@ -89,180 +86,421 @@ export function patchFetch(options: FetchPatchOptions): void {
             : input.url;
       url = new URL(urlStr);
     } catch {
-      // Can't parse URL — not our problem, pass through
       return originalFetch!(input, init);
     }
 
-    // Fast path: not an AI provider URL
-    const extractor = findExtractor(url);
-    if (!extractor) {
-      // Not an AI call — but if we have a traceId, propagate it via headers
-      // so downstream microservices can join the same trace
-      const ctx = getCurrentContext();
-      if (ctx.traceId) {
-        const headers = new Headers(init?.headers);
-        headers.set(TRACE_HEADER, ctx.traceId);
-        if (ctx.traceName) headers.set(TRACE_NAME_HEADER, ctx.traceName);
-        return originalFetch!(input, { ...init, headers });
-      }
+    // Fast path: not a captured host.
+    const target = findCaptureTarget(url);
+    if (!target) {
+      // Non-AI requests pass through untouched. Context propagation is an
+      // explicit caller decision via CostKey.exportContext()/headers.
       return originalFetch!(input, init);
     }
 
-    // ── AI call detected ──
-
-    // Capture stack trace BEFORE the async call (otherwise we lose the caller's frames)
+    // Capture the stack before the first await, while the caller's frames exist.
     const callSite = captureCallSite();
-    const context = { ...options.defaultContext, ...getCurrentContext() };
+    const context = { ...options.defaultContext, ...getCallContext() };
 
-    // Auto-generate traceId if none exists in context
-    // Hash the parent frames of the stack trace — calls from the same
-    // request handler get the same hash = same trace
-    if (!context.traceId && callSite) {
-      context.traceId = generateTraceIdFromStack(callSite.frames);
+    // An explicit trusted handoff may arrive as a carrier or the legacy trace
+    // headers. Never manufacture a trace from stack frames.
+    const inputRequest =
+      typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const incomingContext = getHeader(init?.headers, CONTEXT_HEADER)
+      ?? getHeader(inputRequest?.headers, CONTEXT_HEADER);
+    if (incomingContext) {
+      const imported = importContext(incomingContext);
+      for (const [key, value] of Object.entries(imported)) {
+        if (context[key] === undefined) context[key] = value;
+      }
     }
-
-    // Check if an incoming trace header was set by an upstream service
-    // (this happens when Service A calls Service B and both have CostKey)
-    if (!context.traceId && init?.headers) {
-      const incomingTraceId = getHeader(init.headers, TRACE_HEADER);
+    if (!context.traceId) {
+      const incomingTraceId = getHeader(init?.headers, TRACE_HEADER)
+        ?? getHeader(inputRequest?.headers, TRACE_HEADER);
       if (incomingTraceId) {
         context.traceId = incomingTraceId;
-        const incomingName = getHeader(init.headers, TRACE_NAME_HEADER);
+        const incomingName = getHeader(init?.headers, TRACE_NAME_HEADER)
+          ?? getHeader(inputRequest?.headers, TRACE_NAME_HEADER);
         if (incomingName) context.traceName = incomingName;
       }
     }
 
+    // An explicit adapter (Bedrock middleware, manual recordUsage) owns this
+    // request: keep its behavior and record nothing here.
+    if (isManualCapture(context)) {
+      return originalFetch!(
+        removeContextHeadersFromRequest(input),
+        removeContextHeaders(init),
+      );
+    }
+
     const startTime = performance.now();
+    const startedAt = new Date().toISOString();
+    let modifiedInit = removeContextHeaders(init);
+    const forwardedInput = removeContextHeadersFromRequest(input);
 
-    // Parse and potentially modify the request body
-    let requestBody: unknown = null;
-    let modifiedInit = init;
-
-    if (init?.body) {
+    // The request body as it will be sent; `stream_options.include_usage` is
+    // the one change the SDK makes to a request.
+    let sentBody: unknown = init?.body ?? null;
+    let parsedRequest: unknown = null;
+    if (typeof sentBody === "string") {
       try {
-        requestBody = JSON.parse(init.body as string);
-
-        // Inject stream_options for providers that need it (OpenAI)
-        if (extractor.injectStreamOptions) {
-          const modified = extractor.injectStreamOptions(requestBody);
-          if (modified !== requestBody) {
-            modifiedInit = {
-              ...init,
-              body: JSON.stringify(modified),
-            };
-          }
-        }
+        parsedRequest = JSON.parse(sentBody);
       } catch {
-        // Body isn't JSON or can't be parsed — that's fine
+        parsedRequest = null;
+      }
+      if (parsedRequest !== null) {
+        const injected = injectStreamUsage(target, parsedRequest);
+        if (injected !== parsedRequest) {
+          parsedRequest = injected;
+          sentBody = JSON.stringify(injected);
+          modifiedInit = { ...modifiedInit, body: sentBody as string };
+        }
       }
     }
 
-    const isStreaming =
-      requestBody != null &&
-      typeof requestBody === "object" &&
-      (requestBody as Record<string, unknown>)["stream"] === true;
+    const method = (
+      init?.method
+      ?? inputRequest?.method
+      ?? (init?.body != null ? "POST" : "GET")
+    ).toUpperCase();
+    const requestSkeleton = requestBodySkeleton(sentBody);
+    const request: TelemetryRequest = {
+      method,
+      url: sanitizeTelemetryUrl(url),
+      headers: telemetryRequestHeaders(inputRequest?.headers, init?.headers),
+      body: requestSkeleton.body,
+      bytes: requestSkeleton.bytes,
+    };
+    const isStreaming = isStreamingRequest(url, parsedRequest);
+    const captureBody = shouldCaptureBody(options);
+    const contentRequestBody = captureBody
+      ? parsedRequest ?? formFields(sentBody) ?? (typeof sentBody === "string" ? sentBody : null)
+      : null;
 
-    // Budget / rate-limit check. If block policy, return synthetic 429
-    // so user code can handle it like any upstream rate limit. If throw
-    // policy, this throws a typed error. If warn policy, proceeds.
-    //
-    // Model is extracted conservatively from the request body (final model
-    // may only be known post-response for some providers). Frames are the
-    // captured callsite so scope_function matches can apply.
-    if (activeGuard?.enabled) {
-      const modelForCheck = extractor.extractModel(requestBody, null);
-      const framesForCheck = callSite?.frames ?? [];
-      const check = activeGuard.checkOrThrow(modelForCheck, framesForCheck, estimateTokens(requestBody));
-      if (check === "blocked") {
-        return new Response(
-          JSON.stringify({
-            error: {
-              type: "costkey_blocked",
-              message:
-                "Request blocked by CostKey client-side budget/rate limit",
-            },
-          }),
-          {
-            status: 429,
-            headers: {
-              "Content-Type": "application/json",
-              "X-CostKey-Blocked": "1",
-              "Retry-After": "60",
-            },
-          },
-        );
-      }
+    // Each observed request gets its own event and admission identity. An
+    // explicit attempt label groups retries but never becomes the event id.
+    const eventId = generateId();
+    const retryAttemptId =
+      typeof context.attemptId === "string" && context.attemptId.trim()
+        ? context.attemptId.trim()
+        : undefined;
+    const base: CallBase = {
+      eventId,
+      retryAttemptId,
+      url,
+      method,
+      startedAt,
+      startTime,
+      callSite,
+      context,
+      request,
+      captureBody,
+      contentRequestBody,
+    };
+
+    let admission: PolicyAdmissionResult | null = null;
+    if (options.policy) {
+      admission = await options.policy.admit({
+        projectId: options.projectId,
+        admissionId: eventId,
+        requestId: eventId,
+        traceId: context.traceId,
+        executionId: context.executionId,
+        context: policyContext(context),
+        telemetry: { v: TELEMETRY_VERSION, request },
+      });
     }
 
-    // Make the actual fetch call
     let response: Response;
     try {
-      response = await originalFetch!(input, modifiedInit ?? init);
+      response = await originalFetch!(forwardedInput, modifiedInit);
     } catch (err) {
-      // Fetch itself failed (network error, DNS, etc.)
-      // Still try to record the failed call
-      const durationMs = performance.now() - startTime;
-      const event = buildEvent({
-        projectId: options.projectId,
-        extractor,
-        url,
-        method: init?.method ?? "POST",
-        statusCode: null,
-        requestBody: options.captureBody ? requestBody : null,
-        responseBody: null,
-        usage: null,
-        model: extractor.extractModel(requestBody, null),
-        durationMs,
-        streaming: isStreaming,
-        streamTiming: null,
-        callSite,
-        context,
+      // The request never produced a response (network, DNS, abort).
+      const event = buildCallEvent(base, options.projectId, {
+        response: null,
+        stream: null,
+        error: telemetryError(err),
+        durationMs: performance.now() - startTime,
+        contentResponseBody: null,
       });
-      await sendEvent(event, options);
-      throw err; // Re-throw — we never swallow user-facing errors
+      if (options.policy && admission?.reservationId) {
+        trackPolicySettlement(settlePolicy(options.policy, admission, options.projectId, eventId, "unknown", true));
+      }
+      await sendEvent(event, options, captureBody);
+      throw err; // Never swallow the caller's error.
     }
 
-    // For non-streaming responses: clone, read body, extract usage
-    if (!isStreaming) {
-      void processNonStreamingResponse(
-        response.clone(),
-        {
-          startTime,
-          url,
-          method: init?.method ?? "POST",
-          statusCode: response.status,
-          requestBody,
-          callSite,
-          context,
-          extractor,
-        },
+    const responseBase = {
+      status: response.status,
+      headers: telemetryResponseHeaders(response.headers),
+    };
+    const mode = responseMode(response, isStreaming);
+
+    if (mode.kind === "full" || mode.kind === "empty") {
+      trackPendingCapture(recordFullResponse(
+        mode.kind === "full" ? response.clone() : null,
+        responseBase,
+        base,
+        admission,
         options,
-      );
+      ));
       return response;
     }
 
-    // For streaming responses: wrap the body to capture timing + final usage
-    return processStreamingResponse(response, {
-      startTime,
-      url,
-      method: init?.method ?? "POST",
-      requestBody,
-      callSite,
-      context,
-      extractor,
-      options,
-    });
+    if (mode.kind === "binary") {
+      const length = contentLength(response.headers);
+      if (length !== null || !response.body) {
+        // The size is known without reading audio or image bytes the caller streams.
+        trackPendingCapture(finishCall(base, admission, options, {
+          response: { ...responseBase, body: { $bytes: length }, bytes: length },
+          stream: null,
+          error: null,
+          durationMs: performance.now() - startTime,
+          contentResponseBody: null,
+          completed: true,
+        }));
+        return response;
+      }
+      return observeBody(response, null, base, responseBase, admission, options);
+    }
+
+    return observeBody(response, mode.format, base, responseBase, admission, options);
+  };
+}
+
+// ── Response handling ──
+
+interface CallBase {
+  eventId: string;
+  retryAttemptId?: string;
+  url: URL | null;
+  method: string;
+  startedAt: string;
+  startTime: number;
+  callSite: CallSite | null;
+  context: EventContext;
+  request: TelemetryRequest | null;
+  captureBody: boolean;
+  contentRequestBody: unknown;
+}
+
+interface CallResult {
+  response: TelemetryResponse | null;
+  stream: CallTelemetry["stream"];
+  error: CallTelemetry["error"];
+  durationMs: number;
+  contentResponseBody: unknown;
+}
+
+type ResponseMode =
+  | { kind: "empty" }
+  | { kind: "full" }
+  | { kind: "binary" }
+  | { kind: "stream"; format: StreamFormat };
+
+/**
+ * How to observe a response without disturbing the caller: JSON and text are
+ * read from a clone, streams are read as they pass through, and binary bodies
+ * (audio, images) are never buffered.
+ */
+function responseMode(response: Response, isStreaming: boolean): ResponseMode {
+  if (!response.body) return { kind: "empty" };
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.includes("application/vnd.amazon.eventstream")) return { kind: "stream", format: "aws-eventstream" };
+  if (contentType.includes("text/event-stream")) return { kind: "stream", format: "sse" };
+  if (contentType.includes("ndjson")) return { kind: "stream", format: "ndjson" };
+  const textual = contentType === "" || contentType.includes("json") || contentType.startsWith("text/");
+  if (!textual) return { kind: "binary" };
+  if (isStreaming) return { kind: "stream", format: contentType.includes("json") ? "json-array" : "sse" };
+  return { kind: "full" };
+}
+
+async function recordFullResponse(
+  clone: Response | null,
+  responseBase: { status: number; headers: Record<string, string> },
+  base: CallBase,
+  admission: PolicyAdmissionResult | null,
+  options: FetchPatchOptions,
+): Promise<void> {
+  let body: unknown = null;
+  let bytes: number | null = clone ? null : 0;
+  let contentResponseBody: unknown = null;
+  let error: CallTelemetry["error"] = null;
+  if (clone) {
+    try {
+      const buffer = new Uint8Array(await clone.arrayBuffer());
+      const text = new TextDecoder().decode(buffer);
+      const skeleton = textBodySkeleton(text, buffer.byteLength);
+      body = skeleton.body;
+      bytes = skeleton.bytes;
+      if (base.captureBody && text.length > 0) {
+        try {
+          contentResponseBody = JSON.parse(text) as unknown;
+        } catch {
+          contentResponseBody = text;
+        }
+      }
+    } catch (readError) {
+      error = telemetryError(readError);
+    }
+  }
+  await finishCall(base, admission, options, {
+    response: { ...responseBase, body, bytes },
+    stream: null,
+    error,
+    durationMs: performance.now() - base.startTime,
+    contentResponseBody,
+    completed: error === null,
+  });
+}
+
+/**
+ * Pass the body through unchanged while recording it: stream records as
+ * skeletons (with timing), or only the byte count for an unsized binary body.
+ * With content capture on, every JSON event of a stream is also kept whole,
+ * in order, and sent as `responseBody: {"__costkey_stream__": [...]}`.
+ * The call is recorded once, when the body ends, fails or is cancelled.
+ */
+function observeBody(
+  response: Response,
+  format: StreamFormat | null,
+  base: CallBase,
+  responseBase: { status: number; headers: Record<string, string> },
+  admission: PolicyAdmissionResult | null,
+  options: FetchPatchOptions,
+): Response {
+  const body = response.body!;
+  const reader = body.getReader();
+  const recorder = format ? new StreamRecorder(format, base.startTime) : null;
+  const eventDecoder = format === "aws-eventstream" ? new EventStreamDecoder() : null;
+  const textDecoder = new TextDecoder();
+  // Content capture: SSE events with an `event:` name become {event, data}.
+  const content: unknown[] | null = recorder && base.captureBody ? [] : null;
+  const parser = recorder && format && format !== "aws-eventstream"
+    ? new TextStreamParser(
+      format,
+      (record) => recorder.record(record),
+      content ? (record, event) => content.push(event ? { event, data: record } : record) : null,
+    )
+    : null;
+  let bytes = 0;
+  let recorded = false;
+
+  let resolveDone!: () => void;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  trackPendingCapture(done);
+
+  const record = async (completed: boolean, error: unknown): Promise<void> => {
+    if (recorded) return;
+    recorded = true;
+    try {
+      try {
+        if (parser) {
+          parser.push(textDecoder.decode());
+          parser.end();
+        }
+      } catch {
+        // A malformed tail never blocks recording what was seen.
+      }
+      await finishCall(base, admission, options, {
+        response: {
+          ...responseBase,
+          body: recorder ? null : { $bytes: bytes },
+          bytes,
+        },
+        stream: recorder ? recorder.telemetry() : null,
+        error: telemetryError(error),
+        durationMs: performance.now() - base.startTime,
+        contentResponseBody: content ? { [STREAM_CONTENT_KEY]: content } : null,
+        completed,
+      });
+    } catch {
+      // Telemetry never errors the caller's stream.
+    } finally {
+      resolveDone();
+    }
   };
 
-  // Pin the name so minification can't lose it. This is the value that appears
-  // in stack frames and the server filter keys on the `__ck_` prefix.
-  try {
-    Object.defineProperty(patchedFetch, "name", { value: "__ck_patched_fetch__" });
-  } catch {
-    // Some environments (rare) have a non-configurable .name. Harmless.
-  }
+  const wrapped = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done: finished, value } = await reader.read();
+        if (finished) {
+          controller.close();
+          await record(true, null);
+          return;
+        }
+        // Pass the bytes on first: no buffering delay for the caller.
+        controller.enqueue(value);
+        try {
+          bytes += value.byteLength;
+          if (recorder) {
+            recorder.arrived();
+            if (eventDecoder) {
+              for (const message of eventDecoder.push(value)) {
+                recorder.record(eventStreamChunk(message));
+                if (content) {
+                  const element = eventStreamContent(message);
+                  if (element !== undefined) content.push(element);
+                }
+              }
+            } else if (parser) {
+              parser.push(textDecoder.decode(value, { stream: true }));
+            }
+          }
+        } catch {
+          // Recording never interrupts the caller's stream.
+        }
+      } catch (err) {
+        controller.error(err);
+        await record(false, err);
+      }
+    },
+    cancel(reason) {
+      void reader.cancel(reason)
+        .catch(() => undefined)
+        .then(() => record(false, reason));
+    },
+  });
 
-  globalThis.fetch = patchedFetch;
+  return new Response(wrapped, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+async function finishCall(
+  base: CallBase,
+  admission: PolicyAdmissionResult | null,
+  options: FetchPatchOptions,
+  result: CallResult & { completed: boolean },
+): Promise<void> {
+  const event = buildCallEvent(base, options.projectId, result);
+  if (options.policy && admission?.reservationId) {
+    const status = result.response?.status ?? 0;
+    const outcome = result.completed && status >= 200 && status < 300 ? "success" : "unknown";
+    trackPolicySettlement(settlePolicy(options.policy, admission, options.projectId, base.eventId, outcome, true));
+  }
+  await sendEvent(event, options, base.captureBody);
+}
+
+function contentLength(headers: Headers): number | null {
+  const value = headers.get("content-length");
+  if (value === null || !/^\d+$/.test(value.trim())) return null;
+  return Number(value);
+}
+
+/** String fields of a FormData body (content capture only); files are skipped. */
+function formFields(body: unknown): Record<string, string> | null {
+  if (typeof FormData === "undefined" || !(body instanceof FormData)) return null;
+  const fields: Record<string, string> = {};
+  for (const [key, value] of body.entries()) {
+    if (typeof value === "string") fields[key] = value;
+  }
+  return Object.keys(fields).length > 0 ? fields : null;
 }
 
 /** Restore the original fetch. Used for cleanup/testing. */
@@ -272,463 +510,333 @@ export function unpatchFetch(): void {
     originalFetch = null;
     isPatched = false;
   }
+  activeOptions = null;
 }
 
-// ── Non-streaming response processing ──
-
-interface ResponseMeta {
-  startTime: number;
-  url: URL;
-  method: string;
-  statusCode: number;
-  requestBody: unknown;
-  callSite: ReturnType<typeof captureCallSite>;
-  context: EventContext;
-  extractor: ReturnType<typeof findExtractor> & {};
+/** Wait for response processing already started by fetch(). */
+export async function flushPendingCaptures(): Promise<void> {
+  await drain(pendingCaptures);
 }
 
-async function processNonStreamingResponse(
-  clonedResponse: Response,
-  meta: ResponseMeta,
-  options: FetchPatchOptions,
-): Promise<void> {
+/** Wait for policy reservations settled by completed provider calls. */
+export async function flushPendingPolicy(): Promise<void> {
+  await drain(pendingPolicySettlements);
+}
+
+async function drain(set: Set<Promise<void>>): Promise<void> {
+  const pending = [...set];
+  if (pending.length === 0) return;
+  const all = Promise.allSettled(pending);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
-    const durationMs = performance.now() - meta.startTime;
-    let responseBody: unknown = null;
-
-    try {
-      responseBody = await clonedResponse.json();
-    } catch {
-      // Response isn't JSON — still record the call, just without usage
-    }
-
-    const usage = responseBody
-      ? meta.extractor.extractUsage(responseBody)
-      : null;
-    const model = meta.extractor.extractModel(meta.requestBody, responseBody);
-
-    // Record against budget/rate-limit counters using our local pricing.
-    // The server may compute a slightly different (more authoritative) cost,
-    // but for client-side enforcement this is good enough.
-    activeGuard?.record(
-      estimateCost(usage, model),
-      totalTokens(usage),
-      model,
-      meta.callSite?.frames ?? [],
-    );
-
-    const event = buildEvent({
-      projectId: options.projectId,
-      extractor: meta.extractor,
-      url: meta.url,
-      method: meta.method,
-      statusCode: meta.statusCode,
-      requestBody: options.captureBody ? meta.requestBody : null,
-      responseBody: options.captureBody ? responseBody : null,
-      usage,
-      model,
-      durationMs,
-      streaming: false,
-      streamTiming: null,
-      callSite: meta.callSite,
-      context: meta.context,
-    });
-
-    await sendEvent(event, options);
-  } catch (err) {
-    if (options.debug) {
-      console.warn("[costkey] failed to process non-streaming response:", err);
-    }
-    // Never crash user's app. Silently fail.
+    await Promise.race([
+      all,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, 5_000);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+  if (timedOut) {
+    for (const promise of pending) set.delete(promise);
   }
 }
 
-// ── Streaming response processing ──
+function trackPendingCapture(pending: Promise<void>): void {
+  pendingCaptures.add(pending);
+  void pending.finally(() => pendingCaptures.delete(pending));
+}
 
-interface StreamMeta {
-  startTime: number;
-  url: URL;
-  method: string;
-  requestBody: unknown;
-  callSite: ReturnType<typeof captureCallSite>;
+// ── Calls observed outside fetch ──
+
+/** A provider call seen by another integration (AWS SDK middleware, Claude Agent SDK). */
+export interface ObservedCall {
+  telemetry: CallTelemetry;
+  /** The provider URL when there is one; empty for calls made in another process. */
+  url?: URL | null;
+  method?: string;
+  callSite: CallSite | null;
+  /** Context captured when the call was made; default context is added here. */
   context: EventContext;
-  extractor: ReturnType<typeof findExtractor> & {};
-  options: FetchPatchOptions;
+  /** Content, only sent when body capture is on. */
+  requestContent?: unknown;
+  responseContent?: unknown;
 }
 
-function processStreamingResponse(
-  response: Response,
-  meta: StreamMeta,
-): Response {
-  if (!response.body) return response;
+/** Whether the SDK is initialized with a DSN and can record calls. */
+export function isCaptureActive(): boolean {
+  return isPatched && activeOptions !== null;
+}
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+/** Whether content capture (requestBody/responseBody) is on right now. */
+export function isContentCaptureActive(): boolean {
+  return activeOptions !== null && isPatched && shouldCaptureBody(activeOptions);
+}
 
-  let firstChunkTime: number | null = null;
-  let chunkCount = 0;
-  let accumulatedText = "";
-  let lastUsage: NormalizedUsage | null = null;
+/** Record a call observed outside fetch through the same event pipeline. */
+export function recordObservedCall(observed: ObservedCall): void {
+  const options = activeOptions;
+  if (!options) return;
+  const pending = (async () => {
+    try {
+      const context = { ...options.defaultContext, ...observed.context };
+      const captureBody = shouldCaptureBody(options);
+      const telemetry = observed.telemetry;
+      const base: CallBase = {
+        eventId: generateId(),
+        retryAttemptId:
+          typeof context.attemptId === "string" && context.attemptId.trim()
+            ? context.attemptId.trim()
+            : undefined,
+        url: observed.url ?? null,
+        method: observed.method ?? telemetry.request?.method ?? "",
+        startedAt: telemetry.startedAt,
+        startTime: performance.now(),
+        callSite: observed.callSite,
+        context,
+        request: telemetry.request,
+        captureBody,
+        contentRequestBody: captureBody ? observed.requestContent ?? null : null,
+      };
+      const event = buildCallEvent(base, options.projectId, {
+        response: telemetry.response,
+        stream: telemetry.stream,
+        error: telemetry.error,
+        durationMs: telemetry.durationMs ?? 0,
+        contentResponseBody: captureBody ? observed.responseContent ?? null : null,
+      }, telemetry.source);
+      await sendEvent(event, options, captureBody);
+    } catch {
+      // Never crash the caller.
+    }
+  })();
+  trackPendingCapture(pending);
+}
 
-  const wrappedStream = new ReadableStream({
-    async pull(controller) {
+// ── Policy ──
+
+async function settlePolicy(
+  policy: PolicyAdmissionClient,
+  admission: PolicyAdmissionResult,
+  projectId: string,
+  admissionId: string,
+  outcome: PolicySettlementRequest["outcome"],
+  providerAttempted: boolean,
+): Promise<void> {
+  if (!admission.reservationId) return;
+  // Actual usage is derived on the server from the call event with this ID.
+  const request: PolicySettlementRequest = {
+    projectId,
+    reservationId: admission.reservationId,
+    settlementId: `${admissionId}:settlement`,
+    outcome,
+    providerAttempted,
+  };
+  try {
+    await policy.settle(request);
+  } catch {
+    // Settlement is best effort after the provider result; ask the server to
+    // retain the reservation for reconciliation.
+    if (outcome !== "unknown") {
       try {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          controller.close();
-
-          // Stream complete — build and send event
-          const endTime = performance.now();
-          const durationMs = endTime - meta.startTime;
-
-          // Try to parse accumulated SSE data for usage (from the final chunks)
-          if (!lastUsage) {
-            lastUsage = extractUsageFromSSE(accumulatedText, meta.extractor);
-          }
-
-          const streamTiming: StreamTiming = {
-            ttft: firstChunkTime
-              ? firstChunkTime - meta.startTime
-              : null,
-            tps:
-              lastUsage?.outputTokens && firstChunkTime
-                ? lastUsage.outputTokens /
-                  ((endTime - firstChunkTime) / 1000)
-                : null,
-            streamDuration: durationMs,
-            chunkCount,
-          };
-
-          const model = extractModelFromSSE(
-            accumulatedText,
-            meta.requestBody,
-            meta.extractor,
-          );
-
-          // Record against budget/rate-limit counters (streaming path)
-          activeGuard?.record(
-            estimateCost(lastUsage, model),
-            totalTokens(lastUsage),
-            model,
-            meta.callSite?.frames ?? [],
-          );
-
-          const event = buildEvent({
-            projectId: meta.options.projectId,
-            extractor: meta.extractor,
-            url: meta.url,
-            method: meta.method,
-            statusCode: response.status,
-            requestBody: meta.options.captureBody
-              ? meta.requestBody
-              : null,
-            responseBody: null, // Don't capture full stream body
-            usage: lastUsage,
-            model,
-            durationMs,
-            streaming: true,
-            streamTiming,
-            callSite: meta.callSite,
-            context: meta.context,
-          });
-
-          void sendEvent(event, meta.options);
-          return;
-        }
-
-        // Pass chunk through immediately — zero buffering delay for user
-        controller.enqueue(value);
-
-        chunkCount++;
-        if (firstChunkTime === null) {
-          firstChunkTime = performance.now();
-        }
-
-        // Accumulate text for SSE parsing (usage extraction)
-        accumulatedText += decoder.decode(value, { stream: true });
-      } catch (err) {
-        controller.error(err);
+        await policy.settle({ ...request, outcome: "unknown" });
+      } catch {
+        // Settlement remains durably unknown until a later retry.
       }
-    },
-
-    cancel() {
-      void reader.cancel();
-    },
-  });
-
-  // Return a new Response with our wrapped stream but same headers/status
-  return new Response(wrappedStream, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-}
-
-/** Try to extract usage from accumulated SSE text (looks for the last data: line with usage) */
-function extractUsageFromSSE(
-  sseText: string,
-  extractor: ReturnType<typeof findExtractor> & {},
-): NormalizedUsage | null {
-  const lines = sseText.split("\n");
-  // Scan from the end — usage is in the final chunks
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line.startsWith("data: ")) continue;
-    const data = line.slice(6).trim();
-    if (data === "[DONE]") continue;
-
-    try {
-      const parsed = JSON.parse(data);
-      const usage = extractor.extractUsage(parsed);
-      if (usage) return usage;
-    } catch {
-      // Not valid JSON, skip
     }
   }
-  return null;
 }
 
-/** Try to extract model name from accumulated SSE text */
-function extractModelFromSSE(
-  sseText: string,
-  requestBody: unknown,
-  extractor: ReturnType<typeof findExtractor> & {},
-): string | null {
-  const lines = sseText.split("\n");
-  for (const line of lines) {
-    if (!line.startsWith("data: ")) continue;
-    const data = line.slice(6).trim();
-    if (data === "[DONE]") continue;
+function trackPolicySettlement(pending: Promise<void>): void {
+  pendingPolicySettlements.add(pending);
+  void pending.finally(() => pendingPolicySettlements.delete(pending));
+}
 
-    try {
-      const parsed = JSON.parse(data);
-      const model = extractor.extractModel(requestBody, parsed);
-      if (model) return model;
-    } catch {
-      continue;
+function policyContext(context: EventContext): EventContext {
+  const safe: EventContext = {};
+  for (const key of POLICY_CONTEXT_KEYS) {
+    const value = context[key];
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      safe[key] = value;
     }
   }
-  return null;
+  return safe;
+}
+
+const POLICY_CONTEXT_KEYS: Array<keyof EventContext> = [
+  "traceId",
+  "traceName",
+  "groupId",
+  "groupName",
+  "groupKind",
+  "executionId",
+  "feature",
+  "customer",
+  "customerId",
+  "environment",
+  "service",
+  "release",
+  "function",
+  "operation",
+  "phase",
+  "caseId",
+  "datasetRevision",
+  "conversationId",
+  "voiceSessionId",
+];
+
+/**
+ * Whether to read the response as a stream: declared in the body for
+ * OpenAI-style APIs and in the URL for Gemini (:streamGenerateContent,
+ * alt=sse) and Bedrock (*-stream). This only chooses how the body is read.
+ */
+export function isStreamingRequest(url: URL, requestBody: unknown): boolean {
+  if (requestBody && typeof requestBody === "object" && (requestBody as Record<string, unknown>)["stream"] === true) {
+    return true;
+  }
+  const path = url.pathname;
+  if (/:(streamGenerateContent|streamRawPredict)$/.test(path) || url.searchParams.get("alt") === "sse") return true;
+  if (/\/(invoke-with-response-stream|converse-stream)$/.test(path)) return true;
+  return false;
 }
 
 // ── Event building ──
 
-interface BuildEventParams {
-  projectId: string;
-  extractor: ReturnType<typeof findExtractor> & {};
-  url: URL;
-  method: string;
-  statusCode: number | null;
-  requestBody: unknown;
-  responseBody: unknown;
-  usage: NormalizedUsage | null;
-  model: string | null;
-  durationMs: number;
-  streaming: boolean;
-  streamTiming: StreamTiming | null;
-  callSite: ReturnType<typeof captureCallSite>;
-  context: EventContext;
+function shouldCaptureBody(options: FetchPatchOptions): boolean {
+  return options.captureBodyRef?.current ?? options.captureBody;
 }
 
-function extractModelFromUrl(url: URL): string | null {
-  // Google Gemini: /v1beta/models/gemini-2.5-flash:generateContent
-  const match = url.pathname.match(/\/models\/([^/:]+)/);
-  return match ? match[1] : null;
+function contextString(context: EventContext, key: string): string | null {
+  const value = context[key];
+  return typeof value === "string" ? value : null;
 }
 
-function buildEvent(params: BuildEventParams): CostKeyEvent {
-  // Fallback: extract model from URL path if provider extractor didn't find it
-  const model = params.model ?? extractModelFromUrl(params.url);
-  const systemPrompt = extractSystemPrompt(params.requestBody);
-
+function buildCallEvent(
+  base: CallBase,
+  projectId: string,
+  result: CallResult,
+  source?: string,
+): CostKeyEvent {
+  const telemetry: CallTelemetry = {
+    v: TELEMETRY_VERSION,
+    ...(source ? { source } : {}),
+    request: base.request,
+    response: result.response,
+    stream: result.stream,
+    error: result.error,
+    startedAt: base.startedAt,
+    durationMs: round(result.durationMs),
+  };
+  const parentEventId = contextString(base.context, "parentEventId");
   return {
-    id: generateId(),
-    timestamp: new Date().toISOString(),
-    projectId: params.projectId,
-    provider: params.extractor.provider,
-    model,
-    url: params.url.toString(),
-    method: params.method,
-    statusCode: params.statusCode,
-    usage: params.usage,
-    costUsd: null, // Server calculates cost from usage + model
-    durationMs: Math.round(params.durationMs * 100) / 100,
-    streaming: params.streaming,
-    streamTiming: params.streamTiming,
-    callSite: params.callSite,
-    context: params.context,
-    metadata: scrubCredentials(extractMetadata(params.requestBody, params.responseBody)) as CostKeyEvent["metadata"],
-    systemPrompt: systemPrompt ? (scrubCredentials(systemPrompt) as string) : null,
-    requestBody: params.requestBody ? scrubCredentials(params.requestBody) : null,
-    responseBody: params.responseBody ? scrubCredentials(params.responseBody) : null,
+    id: base.eventId,
+    eventType: "call",
+    source: "auto",
+    timestamp: base.startedAt,
+    projectId,
+    url: base.url ? stripUrlQuery(base.url) : "",
+    method: base.method,
+    statusCode: result.response?.status ?? null,
+    durationMs: round(result.durationMs),
+    streaming: result.stream !== null,
+    callSite: base.callSite,
+    context: base.context,
+    attemptId: base.retryAttemptId ?? base.eventId,
+    spanId: contextString(base.context, "spanId"),
+    parentEventId: parentEventId?.trim() ? parentEventId.trim() : null,
+    groupId: contextString(base.context, "groupId"),
+    groupName: contextString(base.context, "groupName"),
+    groupKind: contextString(base.context, "groupKind"),
+    executionId: contextString(base.context, "executionId"),
+    phase: contextString(base.context, "phase"),
+    datasetRevision: contextString(base.context, "datasetRevision"),
+    caseId: contextString(base.context, "caseId"),
+    requestBody: base.captureBody && base.contentRequestBody != null
+      ? captureContent(base.contentRequestBody)
+      : null,
+    responseBody: base.captureBody && result.contentResponseBody != null
+      ? captureContent(result.contentResponseBody)
+      : null,
+    telemetry,
   };
 }
 
-function collectToolResults(messages: unknown): unknown[] {
-  if (!Array.isArray(messages)) return [];
-  const results: unknown[] = [];
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const msg = message as Record<string, unknown>;
-    if (msg["role"] === "tool" || msg["role"] === "function") results.push(msg);
-    const content = msg["content"];
-    if (Array.isArray(content)) {
-      results.push(
-        ...content.filter((block) => !!block && typeof block === "object" && (block as Record<string, unknown>)["type"] === "tool_result"),
-      );
-    }
-  }
-  return results;
+/**
+ * Opt-in content capture (requestBody/responseBody): credentials scrubbed and
+ * media bytes omitted. Text is never truncated; the transport splits large
+ * events across POSTs instead.
+ */
+const BINARY_VALUE_KEYS = new Set([
+  "b64_json", "base64", "base64_data", "image_data", "inline_data", "bytes",
+]);
+const IMAGE_DATA_URI = /^data:(image\/[a-z0-9.+-]+)(?:;[^,]*)?,/i;
+
+function captureContent(body: unknown): unknown {
+  return sanitizeCapturedValue(scrubCredentials(body));
 }
 
-function collectResponseItems(responseBody: unknown): {
-  toolCalls: unknown[];
-  webSearches: unknown[];
-  citations: unknown[];
-} {
-  const toolCalls: unknown[] = [];
-  const webSearches: unknown[] = [];
-  const citations: unknown[] = [];
-  if (!responseBody || typeof responseBody !== "object") return { toolCalls, webSearches, citations };
-  const body = responseBody as Record<string, unknown>;
+function sanitizeCapturedValue(value: unknown, key?: string): unknown {
+  if (typeof value === "string") {
+    const image = value.match(IMAGE_DATA_URI);
+    if (image) {
+      const comma = value.indexOf(",");
+      const encodedBytes = Math.max(0, value.length - comma - 1);
+      const approxBytes = Math.floor(encodedBytes * 3 / 4);
+      return `[image data omitted: ${image[1]}; ~${approxBytes} bytes]`;
+    }
 
-  const choices = body["choices"];
-  if (Array.isArray(choices)) {
-    for (const choice of choices) {
-      if (!choice || typeof choice !== "object") continue;
-      const message = (choice as Record<string, unknown>)["message"];
-      if (message && typeof message === "object") {
-        const msg = message as Record<string, unknown>;
-        if (Array.isArray(msg["tool_calls"])) toolCalls.push(...msg["tool_calls"]);
-        if (msg["function_call"]) toolCalls.push(msg["function_call"]);
-        if (Array.isArray(msg["annotations"])) citations.push(...msg["annotations"]);
+    if (key && BINARY_VALUE_KEYS.has(key.toLowerCase()) && value.length > 256) {
+      return `[binary data omitted: ${value.length} chars]`;
+    }
+
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeCapturedValue(item, key));
+  }
+
+  if (value && typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    const mimeType = typeof objectValue["media_type"] === "string"
+      ? objectValue["media_type"]
+      : typeof objectValue["mimeType"] === "string"
+      ? objectValue["mimeType"]
+      : typeof objectValue["mime_type"] === "string"
+        ? objectValue["mime_type"]
+        : null;
+    const imagePayload = (mimeType?.toLowerCase().startsWith("image/") ?? false)
+      || objectValue["type"] === "image"
+      || objectValue["type"] === "input_image"
+      || objectValue["type"] === "base64";
+    const result: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      if (imagePayload && entryKey.toLowerCase() === "data" && typeof entryValue === "string") {
+        const encodedBytes = entryValue.length;
+        result[entryKey] = `[image data omitted: ${mimeType ?? "image/*"}; ~${Math.floor(encodedBytes * 3 / 4)} bytes]`;
+      } else {
+        result[entryKey] = sanitizeCapturedValue(entryValue, entryKey);
       }
     }
+    return result;
   }
 
-  const output = body["output"];
-  if (Array.isArray(output)) {
-    for (const item of output) {
-      if (!item || typeof item !== "object") continue;
-      const obj = item as Record<string, unknown>;
-      const type = String(obj["type"] ?? "");
-      if (type.includes("function_call") || type.includes("tool_call")) toolCalls.push(obj);
-      if (type.includes("web_search")) webSearches.push(obj);
-      if (Array.isArray(obj["content"])) {
-        for (const content of obj["content"]) {
-          if (!content || typeof content !== "object") continue;
-          const annotations = (content as Record<string, unknown>)["annotations"];
-          if (Array.isArray(annotations)) citations.push(...annotations);
-        }
-      }
-    }
-  }
-
-  const content = body["content"];
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const obj = block as Record<string, unknown>;
-      if (obj["type"] === "tool_use") toolCalls.push(obj);
-      if (Array.isArray(obj["citations"])) citations.push(...obj["citations"]);
-    }
-  }
-
-  const functionCalls = body["functionCalls"] ?? body["function_calls"];
-  if (Array.isArray(functionCalls)) toolCalls.push(...functionCalls);
-
-  const candidates = body["candidates"];
-  if (Array.isArray(candidates)) {
-    for (const candidate of candidates) {
-      if (!candidate || typeof candidate !== "object") continue;
-      const grounding = (candidate as Record<string, unknown>)["groundingMetadata"]
-        ?? (candidate as Record<string, unknown>)["grounding_metadata"];
-      if (grounding) webSearches.push(grounding);
-    }
-  }
-
-  const usage = body["usage"];
-  if (usage && typeof usage === "object") {
-    const serverToolUse = (usage as Record<string, unknown>)["server_tool_use"];
-    if (serverToolUse) webSearches.push({ usage: serverToolUse });
-  }
-
-  return { toolCalls, webSearches, citations };
-}
-
-function extractMetadata(requestBody: unknown, responseBody: unknown): CostKeyEvent["metadata"] {
-  if ((!requestBody || typeof requestBody !== "object") && (!responseBody || typeof responseBody !== "object")) return null;
-  const req = requestBody && typeof requestBody === "object" ? requestBody as Record<string, unknown> : {};
-  const prompts = Array.isArray(req["messages"])
-    ? req["messages"].map((message) => {
-      if (!message || typeof message !== "object") return { role: "unknown", content: message };
-      const msg = message as Record<string, unknown>;
-      return { role: String(msg["role"] ?? "unknown"), content: msg["content"] };
-    })
-    : Array.isArray(req["contents"])
-      ? req["contents"].map((content) => ({ role: String((content as Record<string, unknown>)["role"] ?? "user"), content }))
-      : req["input"] != null
-        ? [{ role: "input", content: req["input"] }]
-        : undefined;
-  const { toolCalls, webSearches, citations } = collectResponseItems(responseBody);
-  const toolResults = collectToolResults(req["messages"]);
-  const metadata: NonNullable<CostKeyEvent["metadata"]> = {};
-
-  if (prompts?.length) metadata.prompts = prompts;
-  if (Array.isArray(req["tools"]) && req["tools"].length) metadata.toolDefinitions = req["tools"];
-  if (req["tool_choice"] != null || req["toolChoice"] != null) metadata.toolChoice = req["tool_choice"] ?? req["toolChoice"];
-  if (toolCalls.length) metadata.toolCalls = toolCalls;
-  if (toolResults.length) metadata.toolResults = toolResults;
-  if (webSearches.length) metadata.webSearches = webSearches;
-  if (citations.length) metadata.citations = citations;
-
-  return Object.keys(metadata).length ? metadata : null;
-}
-
-function textFromContent(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return null;
-  const parts = content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (!part || typeof part !== "object") return "";
-      const obj = part as Record<string, unknown>;
-      return typeof obj["text"] === "string" ? obj["text"] : "";
-    })
-    .filter(Boolean);
-  return parts.length ? parts.join("\n") : null;
-}
-
-function extractSystemPrompt(body: unknown): string | null {
-  if (!body || typeof body !== "object") return null;
-  const obj = body as Record<string, unknown>;
-
-  const direct = textFromContent(obj["system"] ?? obj["system_prompt"] ?? obj["systemPrompt"]);
-  if (direct) return direct;
-
-  const systemInstruction = obj["system_instruction"] ?? obj["systemInstruction"];
-  if (systemInstruction && typeof systemInstruction === "object") {
-    const fromParts = textFromContent((systemInstruction as Record<string, unknown>)["parts"]);
-    if (fromParts) return fromParts;
-  }
-
-  const messages = obj["messages"];
-  if (Array.isArray(messages)) {
-    const prompts = messages
-      .filter((msg): msg is Record<string, unknown> => !!msg && typeof msg === "object")
-      .filter((msg) => msg["role"] === "system" || msg["role"] === "developer")
-      .map((msg) => textFromContent(msg["content"]))
-      .filter((text): text is string => !!text);
-    if (prompts.length) return prompts.join("\n\n");
-  }
-
-  return null;
+  return value;
 }
 
 async function sendEvent(
   event: CostKeyEvent,
   options: FetchPatchOptions,
+  captureBody = shouldCaptureBody(options),
 ): Promise<void> {
   try {
     let finalEvent: CostKeyEvent | null = event;
@@ -736,15 +844,25 @@ async function sendEvent(
     if (options.beforeSend) {
       try {
         finalEvent = await options.beforeSend(event);
-      } catch (err) {
+      } catch {
         if (options.debug) {
-          console.warn("[costkey] beforeSend hook threw:", err);
+          console.warn("[costkey] beforeSend hook failed; dropping event");
         }
         return; // Drop the event if beforeSend throws
       }
     }
 
-    if (finalEvent) {
+    if (finalEvent && !captureBody) {
+      // A user hook may mutate an event after it was built. Re-assert the
+      // request-time privacy decision at the final wire boundary.
+      finalEvent = {
+        ...finalEvent,
+        requestBody: null,
+        responseBody: null,
+      };
+    }
+
+    if (finalEvent && isPatched) {
       options.transport.enqueue(finalEvent);
     }
   } catch {
@@ -753,12 +871,10 @@ async function sendEvent(
 }
 
 /**
- * Built-in credential scrubber. Runs automatically on every event.
- * Removes any values that look like API keys, tokens, or secrets
- * from captured request/response bodies.
+ * Built-in credential scrubber for captured content: removes values that look
+ * like API keys, tokens or secrets.
  */
 function scrubCredentials(body: unknown): unknown {
-  // Patterns that look like API keys/secrets
   const SECRET_PATTERNS = [
     /^sk-[a-zA-Z0-9]{20,}$/,           // OpenAI keys
     /^sk-ant-[a-zA-Z0-9-]{20,}$/,      // Anthropic keys
@@ -778,14 +894,6 @@ function scrubCredentials(body: unknown): unknown {
     "private_key", "privatekey",
   ]);
 
-  if (typeof body === "string") {
-    for (const pattern of SECRET_PATTERNS) {
-      if (pattern.test(body)) return "[REDACTED]";
-    }
-    return body;
-  }
-  if (body == null || typeof body !== "object") return body;
-
   function scrub(obj: unknown): unknown {
     if (obj == null) return obj;
     if (typeof obj === "string") {
@@ -798,11 +906,7 @@ function scrubCredentials(body: unknown): unknown {
     if (typeof obj === "object") {
       const result: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-        if (SECRET_KEYS.has(key.toLowerCase())) {
-          result[key] = "[REDACTED]";
-        } else {
-          result[key] = scrub(value);
-        }
+        result[key] = SECRET_KEYS.has(key.toLowerCase()) ? "[REDACTED]" : scrub(value);
       }
       return result;
     }
@@ -817,47 +921,47 @@ function generateId(): string {
   return randomBytes(16).toString("hex");
 }
 
-/**
- * Auto-generate a traceId from stack trace frames.
- *
- * Hashes the "parent frames" (everything except the leaf AI call)
- * so that multiple AI calls made from the same request handler
- * get the same traceId automatically.
- *
- * Example:
- *   Call 1: classifyIntent → handleSearch → expressRouter
- *   Call 2: summarizeDoc → processResults → handleSearch → expressRouter
- *   Shared parents: handleSearch, expressRouter
- *   → Same hash → Same traceId → Grouped as one trace
- */
-function generateTraceIdFromStack(frames: Array<{ functionName: string | null; fileName: string | null; lineNumber: number | null }>): string {
-  // Use parent frames (skip leaf at index 0 — that's the AI call itself)
-  // Take up to 5 parent frames for the hash
-  const parents = frames.slice(1, 6);
+function isManualCapture(context: EventContext): boolean {
+  return ["manual", "explicit", "disabled"].includes(String(context.costkeyCapture));
+}
 
-  if (parents.length === 0) {
-    // No parent frames — use a random ID
-    return `tr_${generateId().slice(0, 16)}`;
+/** Remove CostKey's explicit carrier headers before calling a provider. */
+function removeContextHeaders(init: RequestInit | undefined): RequestInit | undefined {
+  if (!init?.headers) return init;
+  const headers = new Headers(init.headers);
+  let changed = false;
+  for (const name of [CONTEXT_HEADER, TRACE_HEADER, TRACE_NAME_HEADER]) {
+    if (headers.has(name)) {
+      headers.delete(name);
+      changed = true;
+    }
   }
+  return changed ? { ...init, headers } : init;
+}
 
-  // Create a stable string from the parent frames
-  const key = parents
-    .map((f) => `${f.functionName ?? "?"}@${f.fileName ?? "?"}`)
-    .join("|");
-
-  // Simple hash → hex string
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    const char = key.charCodeAt(i);
-    hash = ((hash << 5) - hash + char) | 0;
+function removeContextHeadersFromRequest(
+  input: string | URL | Request,
+): string | URL | Request {
+  if (
+    typeof Request === "undefined" ||
+    !(input instanceof Request)
+  ) {
+    return input;
   }
-
-  // Include a time bucket (5-second window) so traces from different
-  // requests don't collide even if they have the same stack
-  const timeBucket = Math.floor(Date.now() / 5000);
-  const combined = `${Math.abs(hash).toString(36)}_${timeBucket.toString(36)}`;
-
-  return `tr_auto_${combined}`;
+  const headers = new Headers(input.headers);
+  let changed = false;
+  for (const name of [CONTEXT_HEADER, TRACE_HEADER, TRACE_NAME_HEADER]) {
+    if (headers.has(name)) {
+      headers.delete(name);
+      changed = true;
+    }
+  }
+  if (!changed) return input;
+  try {
+    return new Request(input, { headers });
+  } catch {
+    return input;
+  }
 }
 
 /** Read a header value from various header formats */
@@ -869,7 +973,7 @@ function getHeader(headers: unknown, name: string): string | null {
   }
 
   if (Array.isArray(headers)) {
-    const entry = headers.find(([k]) => k.toLowerCase() === name.toLowerCase());
+    const entry = headers.find(([k]) => String(k).toLowerCase() === name.toLowerCase());
     return entry ? entry[1] : null;
   }
 
@@ -882,3 +986,5 @@ function getHeader(headers: unknown, name: string): string | null {
 
   return null;
 }
+
+export type { CaptureTarget };

@@ -20,17 +20,26 @@ describe("DSN Parsing", () => {
 
   it("throws on invalid URL with dashboard link", () => {
     expect(() => parseDSN("not-a-url")).toThrow("Invalid DSN");
-    expect(() => parseDSN("not-a-url")).toThrow("app.costkey.dev");
+    expect(() => parseDSN("not-a-url")).toThrow("Settings, Projects");
   });
 
   it("throws on missing auth key with dashboard link", () => {
     expect(() => parseDSN("https://costkey.dev/my-project")).toThrow("missing auth key");
-    expect(() => parseDSN("https://costkey.dev/my-project")).toThrow("app.costkey.dev");
+    expect(() => parseDSN("https://costkey.dev/my-project")).toThrow("Settings, Projects");
   });
 
   it("throws on missing project ID with dashboard link", () => {
     expect(() => parseDSN("https://key@costkey.dev/")).toThrow("missing project ID");
-    expect(() => parseDSN("https://key@costkey.dev/")).toThrow("app.costkey.dev");
+    expect(() => parseDSN("https://key@costkey.dev/")).toThrow("Settings, Projects");
     expect(() => parseDSN("https://key@costkey.dev")).toThrow("missing project ID");
+  });
+
+  it("keeps the path CostKey is served under", () => {
+    const parsed = parseDSN("https://ck_abc@portal-dev.example.com/costkey/proj_123");
+    expect(parsed.projectId).toBe("proj_123");
+    expect(parsed.endpoint).toBe("https://portal-dev.example.com/costkey/api/v1/events");
+    const nested = parseDSN("http://k@localhost:4300/tools/costkey/proj_9/");
+    expect(nested.projectId).toBe("proj_9");
+    expect(nested.endpoint).toBe("http://localhost:4300/tools/costkey/api/v1/events");
   });
 });

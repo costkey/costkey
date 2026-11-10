@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { exec } from "node:child_process";
+import { withCostkeyMcp } from "./mcp-config.js";
 
 type Framework =
   | "next"
@@ -39,13 +40,14 @@ function arg(name: string): string | undefined {
 }
 
 function getHost(): string {
-  return arg("--host") ?? process.env["COSTKEY_HOST"] ?? "https://app.costkey.dev";
+  return arg("--host") ?? process.env["COSTKEY_HOST"] ?? "http://localhost:4100";
 }
 
 function loadToken(): string | null {
   const flag = arg("--token");
   if (flag) return flag;
-  if (process.env["COSTKEY_TOKEN"]) return process.env["COSTKEY_TOKEN"];
+  // COSTKEY_TOKEN may hold a read-only agent token for .mcp.json; it can't create projects.
+  if (process.env["COSTKEY_TOKEN"] && !process.env["COSTKEY_TOKEN"].startsWith("ck_pat_")) return process.env["COSTKEY_TOKEN"];
   try {
     if (existsSync(TOKEN_FILE)) return readFileSync(TOKEN_FILE, "utf8").trim();
   } catch {
@@ -317,8 +319,8 @@ function ensureEnv(dsn: string | undefined): void {
 function writeGuide(detection: Detection, dsn: string | undefined): void {
   mkdirSync(".costkey", { recursive: true });
   const snippet = detection.language === "py"
-    ? `import costkey\ncostkey.init(dsn="${dsn ?? "https://ck_key@app.costkey.dev/project_id"}")`
-    : `import { CostKey } from "costkey"\nCostKey.init({ dsn: process.env.COSTKEY_DSN ?? "${dsn ?? "https://ck_key@app.costkey.dev/project_id"}" })`;
+    ? `import costkey\ncostkey.init(dsn="${dsn ?? "http://ck_key@localhost:4100/project_id"}")`
+    : `import { CostKey } from "costkey"\nCostKey.init({ dsn: process.env.COSTKEY_DSN ?? "${dsn ?? "http://ck_key@localhost:4100/project_id"}" })`;
   const warning = detection.needsSourcemaps
     ? "\n\nIMPORTANT: This project appears to be bundled/minified. Configure sourcemaps so production stack traces resolve to original source: https://costkey.dev/docs/sourcemaps\n"
     : "";
@@ -340,10 +342,10 @@ function printSnippet(detection: Detection, dsn: string | undefined): void {
   console.log("\nAdd this before your first AI call:\n");
   if (detection.language === "py") {
     console.log("  import costkey");
-    console.log(`  costkey.init(dsn="${dsn ?? "https://ck_key@app.costkey.dev/project_id"}")`);
+    console.log(`  costkey.init(dsn="${dsn ?? "http://ck_key@localhost:4100/project_id"}")`);
   } else {
     console.log('  import { CostKey } from "costkey"');
-    console.log(`  CostKey.init({ dsn: process.env.COSTKEY_DSN ?? "${dsn ?? "https://ck_key@app.costkey.dev/project_id"}" })`);
+    console.log(`  CostKey.init({ dsn: process.env.COSTKEY_DSN ?? "${dsn ?? "http://ck_key@localhost:4100/project_id"}" })`);
   }
   if (detection.needsSourcemaps) {
     console.log("\n\x1b[33mWarning: sourcemaps recommended\x1b[0m");
@@ -353,6 +355,25 @@ function printSnippet(detection: Detection, dsn: string | undefined): void {
   console.log("No-code preload option:");
   console.log(`  ${detection.sidecar}`);
   console.log();
+}
+
+/** Add CostKey to the project's .mcp.json so coding agents can read its calls. */
+function writeMcpConfig(host: string): void {
+  const path = ".mcp.json";
+  const current = readJson(path);
+  if (existsSync(path) && !current) {
+    console.log("[skip] .mcp.json isn't valid JSON. Add CostKey to it by hand: https://costkey.dev/docs/mcp");
+    return;
+  }
+  const next = withCostkeyMcp(current, host);
+  if (!next) {
+    console.log("[ok] .mcp.json already has a costkey server");
+  } else {
+    writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+    console.log("[ok] Added CostKey to .mcp.json (it reads the token from COSTKEY_TOKEN)");
+  }
+  console.log(`\nCreate a token in ${host.replace(/\/+$/, "")}/settings?section=agents, then start your agent with:`);
+  console.log("  export COSTKEY_TOKEN=ck_pat_...\n");
 }
 
 async function login(host: string): Promise<string> {
@@ -461,10 +482,13 @@ async function setup(): Promise<void> {
   ensureEnv(dsn);
   writeGuide(detection, dsn);
   printSnippet(detection, dsn);
-  console.log("Done. Run your app and open the CostKey dashboard to watch events land.\n");
+  console.log("Done. Run your app and open the CostKey dashboard to watch events land.");
+  console.log("Let Claude Code, Cursor or Codex read these calls: npx costkey mcp\n");
 }
 
-if (command === "setup") {
+if (command === "mcp") {
+  writeMcpConfig(getHost());
+} else if (command === "setup") {
   setup().catch((err) => {
     console.error(`\nSetup failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
@@ -473,12 +497,16 @@ if (command === "setup") {
   console.log(`costkey
 
 Usage:
-  costkey setup [--name <project-name>] [--dsn <dsn>]
+  costkey setup [--host <your CostKey URL>] [--name <project-name>] [--dsn <dsn>]
+  costkey mcp [--host <your CostKey URL>]    add CostKey to this project's .mcp.json
+
+The host defaults to http://localhost:4100, a local self-hosted install.
+Set --host or COSTKEY_HOST for any other address.
 
 Examples:
   npx costkey setup
-  npx costkey setup --name my-app
-  npx costkey setup --dsn https://ck_key@app.costkey.dev/project_id
-  COSTKEY_DSN=https://ck_key@app.costkey.dev/project_id npx costkey setup
+  npx costkey setup --host https://costkey.your-company.com --name my-app
+  npx costkey setup --dsn http://ck_key@localhost:4100/project_id
+  COSTKEY_DSN=http://ck_key@localhost:4100/project_id npx costkey setup
 `);
 }
