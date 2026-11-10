@@ -20,7 +20,11 @@ const completion = (message: Record<string, unknown>, finish: string) => ({
   usage,
 });
 
-describe("Mastra integration (@mastra/core bridge)", () => {
+// Mastra itself needs Node 22.13+ and calls the global crypto.randomUUID, which
+// Node 18 doesn't have. The SDK still supports Node 18; only this suite skips.
+const mastraRuns = typeof globalThis.crypto?.randomUUID === "function";
+
+describe.skipIf(!mastraRuns)("Mastra integration (@mastra/core bridge)", () => {
   let harness: Harness;
   let script: Array<() => Response> = [];
   let mastra: Mastra;
