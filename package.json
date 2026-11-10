@@ -1,7 +1,7 @@
 {
   "name": "costkey",
-  "version": "0.5.1",
-  "description": "AI cost observability. Track every LLM call's cost, tokens, latency, prompts, and tool metadata with one CLI command.",
+  "version": "0.7.7",
+  "description": "Sentry for AI costs. Sends raw AI-call and agent telemetry (no processing in your app); the CostKey server derives cost, tokens and usage.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,23 +16,48 @@
     "./register": {
       "types": "./dist/register.d.ts",
       "default": "./dist/register.js"
+    },
+    "./integrations/openai-agents": {
+      "types": "./dist/integrations/openai-agents.d.ts",
+      "default": "./dist/integrations/openai-agents.js"
+    },
+    "./integrations/ai-sdk": {
+      "types": "./dist/integrations/ai-sdk.d.ts",
+      "default": "./dist/integrations/ai-sdk.js"
+    },
+    "./integrations/mastra": {
+      "types": "./dist/integrations/mastra.d.ts",
+      "default": "./dist/integrations/mastra.js"
+    },
+    "./integrations/langchain": {
+      "types": "./dist/integrations/langchain.d.ts",
+      "default": "./dist/integrations/langchain.js"
+    },
+    "./integrations/claude-agent-sdk": {
+      "types": "./dist/integrations/claude-agent-sdk.d.ts",
+      "default": "./dist/integrations/claude-agent-sdk.js"
+    },
+    "./integrations/opentelemetry": {
+      "types": "./dist/integrations/opentelemetry.d.ts",
+      "default": "./dist/integrations/opentelemetry.js"
     }
   },
   "files": [
-    "dist",
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts.map",
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
+    "build": "npm run clean && tsc",
+    "test": "vitest run && tsc -p tsconfig.integrations.json",
     "test:watch": "vitest",
+    "benchmark:overhead": "npm run build && node benchmarks/sdk-overhead.mjs",
+    "test:pack": "npm run build && node benchmarks/check-pack.mjs",
     "prepublishOnly": "npm run build",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },
   "keywords": [
     "ai",
@@ -46,12 +71,17 @@
     "google",
     "azure",
     "tokens",
-    "prompts",
-    "tool-calls",
-    "agents",
-    "budgets",
     "monitoring",
-    "tracing"
+    "sentry",
+    "tracing",
+    "agents",
+    "openai-agents",
+    "langchain",
+    "langgraph",
+    "mastra",
+    "vercel-ai",
+    "opentelemetry",
+    "claude-agent-sdk"
   ],
   "author": "CostKey",
   "license": "MIT",
@@ -63,9 +93,49 @@
   "engines": {
     "node": ">=18"
   },
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": ">=0.3.0",
+    "@langchain/core": ">=1.0.0",
+    "@mastra/core": ">=1.0.0",
+    "@openai/agents": ">=0.20.0",
+    "@opentelemetry/api": ">=1.0.0",
+    "ai": ">=7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@mastra/core": {
+      "optional": true
+    },
+    "@openai/agents": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@ai-sdk/openai": "^4.0.91",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
+    "@langchain/core": "^1.2.17",
+    "@langchain/langgraph": "^1.4.21",
+    "@langchain/openai": "^1.6.2",
+    "@mastra/core": "^1.75.0",
+    "@mastra/observability": "^1.18.4",
+    "@openai/agents": "^0.20.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/context-async-hooks": "^2.12.0",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
+    "@types/node": "^25.5.0",
+    "ai": "^7.0.137",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.0"
+    "vitest": "^3.2.4"
   }
 }
