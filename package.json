@@ -1,6 +1,6 @@
 {
   "name": "costkey",
-  "version": "0.7.7",
+  "version": "0.8.0",
   "description": "Sentry for AI costs. Sends raw AI-call and agent telemetry (no processing in your app); the CostKey server derives cost, tokens and usage.",
   "type": "module",
   "main": "./dist/index.js",

@@ -513,6 +513,18 @@ const summary = await CostKey.runEval({
   it, an `expected` action or text takes priority, and anything else is
   unscored. Pass `score: (item, output) => ({ pass, reason })` to use your own.
 
+## 0.8.0
+
+- `CostKey.runEval({ dataset, task })` runs your task on every item of a
+  labelled dataset, in your environment and with your keys, and scores it.
+  See [Evals on a labelled dataset](#evals-on-a-labelled-dataset).
+- `captureScreens: true` (or `COSTKEY_CAPTURE_SCREENS=true` with
+  `costkey/register`) uploads images sent to the model, such as an agent's
+  screenshots, once each. With screen capture on for the project, the
+  console replays computer-use and browser runs step by step.
+- Pairs with [`@costkey/replay`](https://github.com/costkey/costkey-replay),
+  which records the pages a Playwright or Puppeteer agent drives.
+
 ## 0.7.4
 
 - With body capture on, streamed responses are captured too: every event of
