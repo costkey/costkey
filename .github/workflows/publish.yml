@@ -21,7 +21,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # npm 11.5+ (bundled with Node 24) publishes through npm trusted publishing.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
@@ -42,5 +43,16 @@ jobs:
             exit 1
           fi
 
+      - name: Skip if this version is already on npm
+        id: published
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
+        if: steps.published.outputs.skip != 'true'
         run: npm publish --provenance --access public
